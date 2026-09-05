@@ -20,4 +20,6 @@ sign:
     output: osx-arm64/vt-module-cucm
     release_asset: vt-module-cucm-osx-arm64
     entitlements: .vt/config/module-entitlements.plist
+  identity: 'Developer ID Application: Petoskey Public Schools (8BP6XWVQT9)'
+  package_identifier: org.vtools.cucm
 ...
