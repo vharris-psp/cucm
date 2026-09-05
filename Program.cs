@@ -13,7 +13,11 @@ return await ModuleApplication
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
     .Default("Run 'vt cucm users list' to list CUCM users.")
-    .Command("users", "Query CUCM users through AXL.", ListUsersAsync)
+    .Command(
+        "users",
+        "Query CUCM users through AXL.",
+        ListUsersAsync,
+        ModuleResponseKind.Table)
     .RunAsync(args);
 
 static async ValueTask<int> ListUsersAsync(ModuleContext context)
@@ -44,19 +48,26 @@ static async ValueTask<int> ListUsersAsync(ModuleContext context)
             context.RequireSecret("AXL_PASSWORD"),
             certificate));
 
-        context.Output.WriteLine("USER ID\tDISPLAY NAME\tEMAIL\tPHONE\tDEVICES");
+        var rows = new List<ModuleTableRow>();
         await foreach (var user in cucm.ListUsersAsync(
             maxRecords,
             pageSize,
             context.CancellationToken))
         {
-            context.Output.WriteLine(string.Join('\t',
-                Clean(user.UserId),
-                Clean(user.DisplayName),
-                Clean(user.Email),
-                Clean(user.TelephoneNumber),
-                Clean(string.Join(",", user.AssociatedDevices))));
+            rows.Add(new ModuleTableRow(
+                user.Uuid ?? user.UserId ?? $"user-{rows.Count + 1}",
+                [
+                    Clean(user.UserId),
+                    Clean(user.DisplayName),
+                    Clean(user.Email),
+                    Clean(user.TelephoneNumber),
+                    Clean(string.Join(",", user.AssociatedDevices)),
+                ]));
         }
+        await context.RespondAsync(new ModuleTableResponse(
+            "CUCM users",
+            ["USER ID", "DISPLAY NAME", "EMAIL", "PHONE", "DEVICES"],
+            rows));
         return 0;
     }
     catch (Exception exception) when (exception is ArgumentException or
