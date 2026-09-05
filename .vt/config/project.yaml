@@ -1,0 +1,22 @@
+project: VT_CUCM
+type: module
+environments: {dev: {role: development, mode: dotnet, targets: {run: {command: [], runner: module-source}}}}
+app_project: VT_CUCM.csproj
+kind: module
+sign:
+  name: VT_CUCM
+  project: VT_CUCM.csproj
+  entitlements: .vt/config/module-entitlements.plist
+  output: executable
+  mode: onefile
+  runtime_identifier: osx-arm64
+  input_directory: artifacts/sign/macos/input
+  output_directory: artifacts/sign/macos/output
+  workflow_artifact: vt-module-vt-cucm-osx-arm64-unsigned
+  artifacts:
+  - name: vt-module-vt-cucm-osx-arm64
+    input: osx-arm64/vt-module-vt-cucm
+    output: osx-arm64/vt-module-vt-cucm
+    release_asset: vt-module-vt-cucm-osx-arm64
+    entitlements: .vt/config/module-entitlements.plist
+...

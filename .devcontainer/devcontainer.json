@@ -1,0 +1,37 @@
+{
+    "name": "VT_CUCM",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+    "remoteUser": "vscode",
+    "features": {
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+            "enableNonRootDocker": true,
+            "moby": false
+        },
+        "ghcr.io/devcontainers/features/dotnet:2": {
+            "version": "10.0"
+        }
+    },
+    "remoteEnv": {
+        "PATH": "/home/vscode/.vt/bin:${containerEnv:PATH}",
+        "VT_ENV": "dev",
+        "VT_USERNAME": "vharris"
+    },
+    "forwardPorts": [8400],
+    "portsAttributes": {
+        "8400": {
+            "label": "VT Entra callback",
+            "onAutoForward": "silent",
+            "requireLocalPort": true
+        }
+    },
+    "postCreateCommand": "bash .devcontainer/postCreate.sh",
+    "mounts": [
+        "source=${localWorkspaceFolderBasename}-vt-bin,target=/home/vscode/.vt/bin,type=volume",
+        "source=${localWorkspaceFolderBasename}-vt-auth,target=/home/vscode/.vt/auth,type=volume",
+        "source=${localEnv:HOME}/.vt/bin,target=/opt/vt-host-bin,type=bind,readonly"
+    ]
+}

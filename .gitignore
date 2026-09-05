@@ -1,0 +1,9 @@
+# VT machine-local state
+/.vt/local/
+/.vt/runtime/
+/.vt/.venv/
+/.vt/auth/
+/.vt/cache/
+/.vt/tmp/
+/bin/
+/obj/

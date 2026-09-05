@@ -1,0 +1,17 @@
+contract: vt-module/v1
+id: vt-cucm
+display_name: VT_CUCM
+language: csharp
+entrypoint: vt-module-vt-cucm
+asset_pattern: vt-module-vt-cucm-{os}-{arch}
+protocol:
+  minimum: 1.0
+  maximum: 1.x
+capabilities: []
+agent_components: []
+sdk:
+  name: VTModuleSDK
+  mode: source
+  path: libs/VTModuleSDK
+  project: dotnet/src/Vt.ModuleSdk/Vt.ModuleSdk.csproj
+...
