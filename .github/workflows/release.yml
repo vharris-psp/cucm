@@ -25,7 +25,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: true
+          submodules: false
+      - name: Resolve source dependency revisions
+        id: sources
+        shell: bash
+        run: |
+          echo "vsharp=$(git rev-parse HEAD:libs/VSharp)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git rev-parse HEAD:libs/VTModuleSDK)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: vharris-psp/VSharp
+          ref: ${{ steps.sources.outputs.vsharp }}
+          path: libs/VSharp
+          ssh-key: ${{ secrets.VSHARP_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: vharris-psp/VTModuleSDK
+          ref: ${{ steps.sources.outputs.sdk }}
+          path: libs/VTModuleSDK
+          ssh-key: ${{ secrets.VTMODULESDK_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
@@ -33,21 +53,21 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          asset="vt-module-vt-cucm-${{ matrix.os }}-${{ matrix.arch }}"
-          dotnet publish "VT_CUCM.csproj" \
+          asset="vt-module-cucm-${{ matrix.os }}-${{ matrix.arch }}"
+          dotnet publish "cucm.csproj" \
             --configuration Release \
             --runtime "${{ matrix.rid }}" \
             --self-contained true \
             --output "artifacts/${{ matrix.rid }}" \
             -p:Version="$version"
-          mv "artifacts/${{ matrix.rid }}/vt-module-vt-cucm" "artifacts/$asset"
+          mv "artifacts/${{ matrix.rid }}/vt-module-cucm" "artifacts/$asset"
           sha256sum "artifacts/$asset" > "artifacts/$asset.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: vt-module-vt-cucm-${{ matrix.rid }}
+          name: vt-module-cucm-${{ matrix.rid }}
           path: |
-            artifacts/vt-module-vt-cucm-${{ matrix.os }}-${{ matrix.arch }}
-            artifacts/vt-module-vt-cucm-${{ matrix.os }}-${{ matrix.arch }}.sha256
+            artifacts/vt-module-cucm-${{ matrix.os }}-${{ matrix.arch }}
+            artifacts/vt-module-cucm-${{ matrix.os }}-${{ matrix.arch }}.sha256
           if-no-files-found: error
 
   build-macos-unsigned:
@@ -56,7 +76,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: true
+          submodules: false
+      - name: Resolve source dependency revisions
+        id: sources
+        shell: bash
+        run: |
+          echo "vsharp=$(git rev-parse HEAD:libs/VSharp)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git rev-parse HEAD:libs/VTModuleSDK)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: vharris-psp/VSharp
+          ref: ${{ steps.sources.outputs.vsharp }}
+          path: libs/VSharp
+          ssh-key: ${{ secrets.VSHARP_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: vharris-psp/VTModuleSDK
+          ref: ${{ steps.sources.outputs.sdk }}
+          path: libs/VTModuleSDK
+          ssh-key: ${{ secrets.VTMODULESDK_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
@@ -64,7 +104,7 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          dotnet publish "VT_CUCM.csproj" \
+          dotnet publish "cucm.csproj" \
             --configuration Release \
             --runtime osx-arm64 \
             --self-contained true \
@@ -72,7 +112,7 @@ jobs:
             -p:Version="$version"
       - uses: actions/upload-artifact@v4
         with:
-          name: vt-module-vt-cucm-osx-arm64-unsigned
+          name: vt-module-cucm-osx-arm64-unsigned
           path: artifacts/sign/macos/input
           if-no-files-found: error
           retention-days: 7
@@ -86,7 +126,7 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           path: artifacts
-          pattern: vt-module-vt-cucm-linux-*
+          pattern: vt-module-cucm-linux-*
           merge-multiple: true
       - name: Create release
         env:

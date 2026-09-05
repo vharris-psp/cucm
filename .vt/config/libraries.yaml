@@ -5,7 +5,7 @@ libraries:
     url: https://github.com/vharris-psp/VSharp.git
     path: libs/VSharp
     upstream_branch: main
-    work_branch: vt/vt_cucm
+    work_branch: cucm
     base_commit: 195a3bd765c863ae0b9d4b1f192cf4550699d7ed
     version: 0.2.0
   VTModuleSDK:
@@ -13,7 +13,7 @@ libraries:
     url: https://github.com/vharris-psp/VTModuleSDK.git
     path: libs/VTModuleSDK
     upstream_branch: main
-    work_branch: vt/vt_cucm
-    base_commit: cfc6a58ed2669c7cd8718ed12223c14c3c8cb7ea
-    version: 0.1.0
+    work_branch: cucm
+    base_commit: acf322fe8d4d4f71f65c2d9e49fe00f9eccfd928
+    version: 0.2.0
 ...

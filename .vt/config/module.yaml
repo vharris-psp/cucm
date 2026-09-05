@@ -1,13 +1,13 @@
 contract: vt-module/v1
-id: vt-cucm
-display_name: VT_CUCM
+id: cucm
+display_name: CUCM
 language: csharp
-entrypoint: vt-module-vt-cucm
-asset_pattern: vt-module-vt-cucm-{os}-{arch}
+entrypoint: vt-module-cucm
+asset_pattern: vt-module-cucm-{os}-{arch}
 protocol:
   minimum: 1.0
   maximum: 1.x
-capabilities: []
+capabilities: [configuration.v1, secrets.v1, storage.sqlite.v1]
 agent_components: []
 sdk:
   name: VTModuleSDK
