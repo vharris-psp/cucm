@@ -172,10 +172,41 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 ["ACTION", "CURRENT VALUE"],
                 [
                     new ModuleTableRow(
+                        "set-dn",
+                        ["Set directory number", Clean(line.Pattern)],
+                        ["phones", "dn", phoneNameForLine, lineIndex.ToString()]),
+                    new ModuleTableRow(
                         "set-label",
                         ["Set label", Clean(line.Label)],
                         ["phones", "label", phoneNameForLine, lineIndex.ToString()]),
                 ]));
+            return 0;
+        }
+        if (context.Arguments is ["dn", var phoneNameForDnPrompt, var dnIndexText] &&
+            int.TryParse(dnIndexText, out var dnIndex) && dnIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm,
+                phoneNameForDnPrompt,
+                dnIndex,
+                context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Set directory number for line {dnIndex} on {phoneNameForDnPrompt}",
+                "Directory number",
+                ["phones", "set-dn", phoneNameForDnPrompt, dnIndex.ToString()],
+                line.Pattern));
+            return 0;
+        }
+        if (context.Arguments is ["set-dn", var phoneNameForDnUpdate, var dnUpdateIndexText, var newDn] &&
+            int.TryParse(dnUpdateIndexText, out var dnUpdateIndex) && dnUpdateIndex > 0)
+        {
+            await cucm.UpdatePhoneLineDirectoryNumberAsync(
+                phoneNameForDnUpdate,
+                dnUpdateIndex,
+                newDn,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated line {dnUpdateIndex} on {phoneNameForDnUpdate} to directory number '{newDn}'.");
             return 0;
         }
         if (context.Arguments is ["label", var phoneNameForPrompt, var labelIndexText] &&
