@@ -49,3 +49,7 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 3. Review the phone, product, device pool, user, and DN, then save.
 
 Saving creates (or claims) the phone with the user as owner, adds the phone to the user's associated devices, creates the DN in CUCM if needed, assigns it to line 1, and records the assignment in the local inventory — reusing the same primitives as the DID and phone-assignment flows above. If line assignment fails after the phone is created/claimed, the error names the phone so it can be finished manually via `vt cucm phones select <name>`.
+
+## Exporting phones for analysis
+
+`vt cucm get phones` (or **Export CUCM data** from the root menu) pulls phones, optionally filtered to one device pool, with a progress bar while paging, then writes them to the console or a CSV file. Each row includes the phone's identity/config fields plus a `LINES` column (`index:pattern@partition`, pipe-separated) so a downstream tool can analyze existing partition/CSS/voicemail-profile patterns per device pool for a bulk rollout. Per-line calling search space and voicemail profile are not included — cross-reference `vt cucm dn` for those, since fetching them per line here would require one extra AXL call per line.

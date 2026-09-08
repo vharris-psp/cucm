@@ -71,6 +71,11 @@ return await ModuleApplication
         "Provision a CUCM phone from scratch for a user (create/claim, assign DN, review, save).",
         ProvisionAsync,
         ModuleResponseKind.Table)
+    .Command(
+        "get",
+        "Query and export CUCM data (e.g. phones by device pool) to the console or a file.",
+        GetAsync,
+        ModuleResponseKind.Table)
     .RunAsync(args);
 
 static async ValueTask<int> RootAsync(ModuleContext context)
@@ -99,6 +104,10 @@ static async ValueTask<int> RootAsync(ModuleContext context)
                 "provision",
                 ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
                 ["provision"]),
+            new ModuleTableRow(
+                "get",
+                ["Export CUCM data", "Query phones by device pool and export to console or a file"],
+                ["get"]),
         ]));
     return 0;
 }
@@ -520,6 +529,235 @@ static bool TryParseProvisionWizardState(
         Normalize(arguments[7]),
         Normalize(arguments[8]));
     return true;
+}
+
+// Sentinel used in place of a device pool name to mean "no filter, pull every phone."
+static string AllDevicePoolsToken() => "*";
+
+static bool IsAllDevicePools(string pool) => pool == AllDevicePoolsToken();
+
+static string DevicePoolLabel(string pool) =>
+    IsAllDevicePools(pool) ? "all device pools" : $"device pool '{pool}'";
+
+// Query/export command: `vt cucm get phones` pulls CUCM phones (optionally filtered by
+// device pool via the CucmService.CountPhonesByDevicePoolAsync/ListPhonesAsync(devicePoolName:)
+// surface) and either displays them or writes a CSV for downstream routing-pattern analysis.
+static async ValueTask<int> GetAsync(ModuleContext context)
+{
+    try
+    {
+        using var cucm = await CreateCucmAsync(context);
+        if (context.Arguments.Count == 0)
+        {
+            await context.RespondAsync(new ModuleTableResponse(
+                "Query CUCM data",
+                ["RESOURCE", "DESCRIPTION"],
+                [
+                    new ModuleTableRow(
+                        "phones",
+                        ["Phones", "Pull phones, optionally filtered by device pool"],
+                        ["get", "phones"]),
+                ]));
+            return 0;
+        }
+        if (context.Arguments is ["phones"])
+        {
+            var rows = new List<ModuleTableRow>
+            {
+                new(
+                    "all",
+                    ["<All device pools>", string.Empty],
+                    ["get", "phones-output", AllDevicePoolsToken()]),
+            };
+            await foreach (var pool in cucm.ListDevicePoolsAsync(
+                cancellationToken: context.CancellationToken))
+            {
+                if (string.IsNullOrWhiteSpace(pool.Name))
+                {
+                    continue;
+                }
+                rows.Add(new ModuleTableRow(
+                    pool.Uuid ?? $"device-pool:{pool.Name}",
+                    [Clean(pool.Name), Clean(pool.Description)],
+                    ["get", "phones-output", pool.Name]));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Select device pool",
+                ["NAME", "DESCRIPTION"],
+                rows,
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is ["phones-output", var outputPool] &&
+            !string.IsNullOrWhiteSpace(outputPool))
+        {
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Export target for {DevicePoolLabel(outputPool)}",
+                ["OPTION", "DETAIL"],
+                [
+                    new ModuleTableRow(
+                        "console",
+                        ["Console", "Display the results in this session"],
+                        ["get", "phones-run", outputPool, "console"]),
+                    new ModuleTableRow(
+                        "file",
+                        ["File", "Write a CSV file to a path you choose"],
+                        ["get", "phones-file", outputPool]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is ["phones-file", var filePool] &&
+            !string.IsNullOrWhiteSpace(filePool))
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Export {DevicePoolLabel(filePool)} phones",
+                "Output CSV file path",
+                ["get", "phones-run", filePool, "file"]));
+            return 0;
+        }
+        if (context.Arguments is ["phones-run", var runPool, "console"])
+        {
+            var records = await PullPhoneExportRecordsAsync(context, cucm, runPool);
+            await context.RespondAsync(new ModuleTableResponse(
+                $"CUCM phones: {DevicePoolLabel(runPool)}",
+                PhoneExportColumns(),
+                records.Select(ToPhoneExportRow).ToArray()));
+            return 0;
+        }
+        if (context.Arguments is ["phones-run", var fileRunPool, "file", var filePath] &&
+            !string.IsNullOrWhiteSpace(filePath))
+        {
+            var records = await PullPhoneExportRecordsAsync(context, cucm, fileRunPool);
+            await WritePhoneExportCsvAsync(filePath, records, context.CancellationToken);
+            context.Output.WriteLine(
+                $"Wrote {records.Count} CUCM phone(s) for {DevicePoolLabel(fileRunPool)} to " +
+                $"'{filePath}'.");
+            return 0;
+        }
+
+        context.Error.WriteLine("Usage: vt cucm get phones");
+        return 2;
+    }
+    catch (Exception exception) when (IsExpected(exception))
+    {
+        context.Error.WriteLine(exception.Message);
+        return 1;
+    }
+}
+
+static string[] PhoneExportColumns() =>
+[
+    "NAME", "DESCRIPTION", "PRODUCT", "MODEL", "PROTOCOL", "OWNER",
+    "DEVICE POOL", "PHONE TEMPLATE", "SECURITY PROFILE", "LINES",
+];
+
+static PhoneExportRecord ToPhoneExportRecord(CucmPhone phone) =>
+    new(
+        phone.Name ?? string.Empty,
+        phone.Description,
+        phone.Product,
+        phone.Model,
+        phone.Protocol,
+        phone.OwnerUserName,
+        phone.DevicePoolName,
+        phone.PhoneTemplateName,
+        phone.SecurityProfileName,
+        string.Join(
+            "|",
+            phone.Lines
+                .OrderBy(line => line.Index)
+                .Select(line => $"{line.Index}:{line.Pattern}@{line.RoutePartitionName}")));
+
+static ModuleTableRow ToPhoneExportRow(PhoneExportRecord record) =>
+    new(
+        string.IsNullOrWhiteSpace(record.Name) ? Guid.NewGuid().ToString() : record.Name,
+        [
+            record.Name,
+            Clean(record.Description),
+            Clean(record.Product),
+            Clean(record.Model),
+            Clean(record.Protocol),
+            Clean(record.Owner),
+            Clean(record.DevicePool),
+            Clean(record.PhoneTemplate),
+            Clean(record.SecurityProfile),
+            record.Lines,
+        ]);
+
+static async Task<List<PhoneExportRecord>> PullPhoneExportRecordsAsync(
+    ModuleContext context,
+    CucmService cucm,
+    string pool)
+{
+    var poolFilter = IsAllDevicePools(pool) ? null : pool;
+    await context.ReportProgressAsync("Counting CUCM phones", 0, 1);
+    var availablePhones = poolFilter is null
+        ? await cucm.CountPhonesAsync(context.CancellationToken)
+        : await cucm.CountPhonesByDevicePoolAsync(poolFilter, context.CancellationToken);
+    if (availablePhones == 0)
+    {
+        await context.ReportProgressAsync("No CUCM phones found", 1, 1);
+    }
+    else
+    {
+        await context.ReportProgressAsync(
+            $"Loading 0 of {availablePhones} CUCM phones",
+            0,
+            availablePhones);
+    }
+    var records = new List<PhoneExportRecord>();
+    await foreach (var phone in cucm.ListPhonesAsync(
+        cancellationToken: context.CancellationToken,
+        devicePoolName: poolFilter))
+    {
+        records.Add(ToPhoneExportRecord(phone));
+        if (records.Count <= availablePhones)
+        {
+            await context.ReportProgressAsync(
+                $"Loading {records.Count} of {availablePhones} CUCM phones",
+                records.Count,
+                availablePhones);
+        }
+    }
+    if (records.Count != availablePhones)
+    {
+        await context.ReportProgressAsync($"Loaded {records.Count} CUCM phones", 1, 1);
+    }
+    return records;
+}
+
+static async Task WritePhoneExportCsvAsync(
+    string path,
+    IReadOnlyList<PhoneExportRecord> records,
+    CancellationToken cancellationToken)
+{
+    await using var writer = new StreamWriter(path, append: false);
+    await writer.WriteLineAsync(string.Join(",", PhoneExportColumns()));
+    foreach (var record in records)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await writer.WriteLineAsync(string.Join(
+            ",",
+            CsvField(record.Name),
+            CsvField(record.Description),
+            CsvField(record.Product),
+            CsvField(record.Model),
+            CsvField(record.Protocol),
+            CsvField(record.Owner),
+            CsvField(record.DevicePool),
+            CsvField(record.PhoneTemplate),
+            CsvField(record.SecurityProfile),
+            CsvField(record.Lines)));
+    }
+}
+
+static string CsvField(string? value)
+{
+    var text = value ?? string.Empty;
+    return text.Length > 0 && text.IndexOfAny([',', '"', '\n', '\r']) >= 0
+        ? $"\"{text.Replace("\"", "\"\"")}\""
+        : text;
 }
 
 static async ValueTask<int> UsersAsync(ModuleContext context)
@@ -2678,4 +2916,16 @@ sealed record ProvisionWizardState(
     string? PhoneTemplateName = null,
     string? SecurityProfileName = null,
     string? UserId = null);
+
+sealed record PhoneExportRecord(
+    string Name,
+    string? Description,
+    string? Product,
+    string? Model,
+    string? Protocol,
+    string? Owner,
+    string? DevicePool,
+    string? PhoneTemplate,
+    string? SecurityProfile,
+    string Lines);
 
