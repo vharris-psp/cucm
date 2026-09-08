@@ -12,14 +12,22 @@ internal sealed record UserDidAssignment(
     string PhoneName,
     int LineIndex,
     string? UserId,
+    string? RoutePartitionName,
     DateTimeOffset AssignedAt);
 
 internal sealed class UserDidStore(string dataDirectory)
 {
     private const string Schema = "vt-cucm-user-dids/v1";
     private readonly string _path = ResolvePath(dataDirectory);
+    private readonly string _lockPath = ResolvePath(dataDirectory) + ".lock";
 
     internal async Task<IReadOnlyList<UserDid>> LoadAsync(CancellationToken ct = default)
+    {
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        return await LoadCoreAsync(ct);
+    }
+
+    private async Task<IReadOnlyList<UserDid>> LoadCoreAsync(CancellationToken ct)
     {
         if (!File.Exists(_path))
         {
@@ -87,13 +95,15 @@ internal sealed class UserDidStore(string dataDirectory)
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(patterns);
-        var dids = (await LoadAsync(ct)).ToList();
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        var dids = (await LoadCoreAsync(ct)).ToList();
         var added = 0;
         foreach (var pattern in patterns.Select(value => value.Trim()).Distinct(StringComparer.Ordinal))
         {
-            if (!IsPattern(pattern))
+            if (!IsUserExtension(pattern))
             {
-                throw new InvalidOperationException($"'{pattern}' is not a valid DID pattern.");
+                throw new InvalidOperationException(
+                    $"'{pattern}' is not a valid four-digit user DN.");
             }
             var candidate = new UserDid(
                 pattern,
@@ -112,9 +122,49 @@ internal sealed class UserDidStore(string dataDirectory)
         }
         if (added > 0)
         {
-            await SaveAsync(dids, ct);
+            await SaveCoreAsync(dids, ct);
         }
         return added;
+    }
+
+    internal async Task ReplaceAsync(
+        IEnumerable<string> patterns,
+        string? routePartitionName,
+        string? descriptionPrefix,
+        string? callingSearchSpaceName,
+        string? voiceMailProfileName,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(patterns);
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        var existing = await LoadCoreAsync(ct);
+        if (existing.Any(did => did.Assignment is not null))
+        {
+            throw new InvalidOperationException(
+                "The user DID inventory contains assignments and cannot be replaced.");
+        }
+
+        var replacement = patterns
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Select(pattern =>
+            {
+                if (!IsUserExtension(pattern))
+                {
+                    throw new InvalidOperationException(
+                        $"'{pattern}' is not a valid four-digit user DN.");
+                }
+                return new UserDid(
+                    pattern,
+                    Normalize(routePartitionName),
+                    string.IsNullOrWhiteSpace(descriptionPrefix)
+                        ? null
+                        : $"{descriptionPrefix.Trim()} {pattern}",
+                    Normalize(callingSearchSpaceName),
+                    Normalize(voiceMailProfileName));
+            })
+            .ToArray();
+        await SaveCoreAsync(replacement, ct);
     }
 
     internal async Task MarkAssignedAsync(
@@ -123,9 +173,11 @@ internal sealed class UserDidStore(string dataDirectory)
         string phoneName,
         int lineIndex,
         string? userId,
+        string? resolvedRoutePartitionName,
         CancellationToken ct = default)
     {
-        var dids = (await LoadAsync(ct)).ToList();
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        var dids = (await LoadCoreAsync(ct)).ToList();
         var target = dids.FindIndex(did =>
             did.Pattern.Equals(pattern, StringComparison.Ordinal) &&
             string.Equals(
@@ -158,9 +210,10 @@ internal sealed class UserDidStore(string dataDirectory)
                 phoneName,
                 lineIndex,
                 Normalize(userId),
+                Normalize(resolvedRoutePartitionName),
                 DateTimeOffset.UtcNow),
         };
-        await SaveAsync(dids, ct);
+        await SaveCoreAsync(dids, ct);
     }
 
     internal static IReadOnlyList<string> ParsePatterns(string value)
@@ -195,14 +248,25 @@ internal sealed class UserDidStore(string dataDirectory)
                 patterns.Add(current.ToString($"D{range[0].Length}"));
             }
         }
-        if (patterns.Count == 0 || patterns.Any(pattern => !IsPattern(pattern)))
+        if (patterns.Count == 0 || patterns.Any(pattern => !IsUserExtension(pattern)))
         {
-            throw new InvalidOperationException("The user DID list contains an invalid pattern.");
+            throw new InvalidOperationException(
+                "The user DN list must contain four-digit numeric extensions.");
         }
         return patterns.Distinct(StringComparer.Ordinal).ToArray();
     }
 
-    private async Task SaveAsync(IReadOnlyList<UserDid> dids, CancellationToken ct)
+    internal static string? NormalizeUserExtension(string? telephoneNumber)
+    {
+        if (string.IsNullOrWhiteSpace(telephoneNumber))
+        {
+            return null;
+        }
+        var digits = new string(telephoneNumber.Where(char.IsAsciiDigit).ToArray());
+        return digits.Length == 4 ? digits : null;
+    }
+
+    private async Task SaveCoreAsync(IReadOnlyList<UserDid> dids, CancellationToken ct)
     {
         var directory = Path.GetDirectoryName(_path)!;
         Directory.CreateDirectory(directory);
@@ -237,6 +301,10 @@ internal sealed class UserDidStore(string dataDirectory)
                         writer.WriteString("phoneName", assignment.PhoneName);
                         writer.WriteNumber("lineIndex", assignment.LineIndex);
                         WriteOptional(writer, "userId", assignment.UserId);
+                        WriteOptional(
+                            writer,
+                            "routePartitionName",
+                            assignment.RoutePartitionName);
                         writer.WriteString("assignedAt", assignment.AssignedAt);
                         writer.WriteEndObject();
                     }
@@ -253,6 +321,31 @@ internal sealed class UserDidStore(string dataDirectory)
         finally
         {
             File.Delete(temporary);
+        }
+    }
+
+    private async Task<FileStream> AcquireLockAsync(CancellationToken ct)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_lockPath)!);
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var stream = new FileStream(
+                    _lockPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    1,
+                    FileOptions.Asynchronous);
+                SetOwnerOnly(_lockPath);
+                return stream;
+            }
+            catch (IOException)
+            {
+                await Task.Delay(50, ct);
+            }
         }
     }
 
@@ -280,6 +373,7 @@ internal sealed class UserDidStore(string dataDirectory)
             phoneName,
             lineIndex,
             ReadString(assignment, "userId"),
+            ReadString(assignment, "routePartitionName"),
             assignedAt);
     }
 
@@ -303,6 +397,9 @@ internal sealed class UserDidStore(string dataDirectory)
         value.All(character => !char.IsControl(character) &&
             !char.IsWhiteSpace(character) &&
             character is not ',' and not ';');
+
+    private static bool IsUserExtension(string? value) =>
+        value is { Length: 4 } && value.All(char.IsAsciiDigit);
 
     private static string? ReadString(JsonElement item, string property) =>
         item.TryGetProperty(property, out var node) && node.ValueKind == JsonValueKind.String

@@ -58,7 +58,7 @@ return await ModuleApplication
         ModuleResponseKind.Table)
     .Command(
         "dids",
-        "Manage the local approved inventory of user DIDs.",
+        "Manage the local approved inventory of user DNs.",
         UserDidsAsync,
         ModuleResponseKind.Table)
     .Command(
@@ -75,6 +75,8 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
         using var cucm = await CreateCucmAsync(context);
         if (TryParseListArguments(context.Arguments, out var maxRecords, out var pageSize))
         {
+            var dids = await new UserDidStore(context.DataDirectory)
+                .LoadAsync(context.CancellationToken);
             var rows = new List<ModuleTableRow>();
             await foreach (var user in cucm.ListUsersAsync(
                 maxRecords,
@@ -82,6 +84,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 context.CancellationToken))
             {
                 var id = user.UserId ?? user.Uuid ?? $"user-{rows.Count + 1}";
+                var userExtension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber);
                 rows.Add(new ModuleTableRow(
                     id,
                     [
@@ -89,6 +92,8 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                         Clean(user.DisplayName),
                         Clean(user.Email),
                         Clean(user.TelephoneNumber),
+                        Clean(userExtension),
+                        UserDnStatus(user.UserId, userExtension, dids),
                         Clean(string.Join(",", user.AssociatedDevices)),
                     ],
                     string.IsNullOrWhiteSpace(user.UserId)
@@ -97,7 +102,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
             }
             await context.RespondAsync(new ModuleTableResponse(
                 "CUCM users",
-                ["USER ID", "DISPLAY NAME", "EMAIL", "PHONE", "DEVICES"],
+                ["USER ID", "DISPLAY NAME", "EMAIL", "LDAP PHONE", "USER DN", "DN STATUS", "DEVICES"],
                 rows));
             return 0;
         }
@@ -105,11 +110,25 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
         {
             var user = await cucm.GetUserAsync(userId, context.CancellationToken) ??
                 throw new InvalidOperationException($"CUCM user '{userId}' was not found.");
+            var userExtension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber);
+            var did = await FindUserDidAsync(context, userExtension);
             var rows = user.AssociatedDevices
                 .Select(device => new ModuleTableRow(
                     device,
                     ["Phone", device],
                     ["phones", "select", device]))
+                .Prepend(new ModuleTableRow(
+                    "assign-phone",
+                    [
+                        "Assign phone and DN",
+                        UserDnStatus(user.UserId, userExtension, did is null ? [] : [did]),
+                    ],
+                    did is { Assignment: null }
+                        ? ["users", "phones", userId]
+                        : null))
+                .Prepend(new ModuleTableRow(
+                    "user-dn",
+                    ["LDAP user DN", Clean(userExtension)]))
                 .Prepend(new ModuleTableRow(
                     "all-phones",
                     ["Browse", "All CUCM phones"],
@@ -121,6 +140,189 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 rows));
             return 0;
         }
+        if (context.Arguments is ["phones", var phoneUserId])
+        {
+            var user = await RequireUserAsync(cucm, phoneUserId, context.CancellationToken);
+            var did = await RequireAvailableUserDidForUserAsync(context, user);
+            var rows = new List<ModuleTableRow>();
+            await foreach (var phone in cucm.ListPhonesAsync(
+                cancellationToken: context.CancellationToken))
+            {
+                var phoneName = phone.Name;
+                if (string.IsNullOrWhiteSpace(phoneName))
+                {
+                    continue;
+                }
+                var eligible = string.IsNullOrWhiteSpace(phone.OwnerUserName) ||
+                    phone.OwnerUserName.Equals(phoneUserId, StringComparison.OrdinalIgnoreCase);
+                rows.Add(new ModuleTableRow(
+                    phoneName,
+                    [
+                        phoneName,
+                        Clean(phone.Description),
+                        Clean(phone.OwnerUserName),
+                        eligible ? $"Assign {did.Pattern}" : "Owned by another user",
+                    ],
+                    eligible ? ["users", "phone", phoneUserId, phoneName] : null));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Select a phone for {user.DisplayName ?? phoneUserId} ({did.Pattern})",
+                ["PHONE", "DESCRIPTION", "OWNER", "STATUS"],
+                rows));
+            return 0;
+        }
+        if (context.Arguments is ["phone", var slotUserId, var slotPhoneName])
+        {
+            var user = await RequireUserAsync(cucm, slotUserId, context.CancellationToken);
+            _ = await RequireAvailableUserDidForUserAsync(context, user);
+            var phone = await RequirePhoneAsync(cucm, slotPhoneName, context.CancellationToken);
+            EnsurePhoneCanBeAssignedToUser(phone, slotUserId);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Assign {UserDidStore.NormalizeUserExtension(user.TelephoneNumber)} to {slotPhoneName}",
+                "Line slot index",
+                ["users", "review", slotUserId, slotPhoneName],
+                "1"));
+            return 0;
+        }
+        if (context.Arguments is
+            ["review", var reviewUserId, var reviewPhoneName, var reviewSlotText] &&
+            int.TryParse(reviewSlotText, out var reviewSlot) && reviewSlot > 0)
+        {
+            var user = await RequireUserAsync(cucm, reviewUserId, context.CancellationToken);
+            var did = await RequireAvailableUserDidForUserAsync(context, user);
+            var phone = await RequirePhoneAsync(cucm, reviewPhoneName, context.CancellationToken);
+            EnsurePhoneCanBeAssignedToUser(phone, reviewUserId);
+            var existing = await cucm.GetDirectoryNumberAsync(
+                did.Pattern,
+                did.RoutePartitionName,
+                context.CancellationToken);
+            EnsureUserDidCanBeAssigned(did, existing);
+            var reviewUserResolvedPartition = existing?.RoutePartitionName ?? did.RoutePartitionName;
+            var currentLine = phone.Lines.FirstOrDefault(line => line.Index == reviewSlot);
+            var alreadyAssociated = user.AssociatedDevices.Contains(
+                reviewPhoneName,
+                StringComparer.OrdinalIgnoreCase);
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review user phone assignment",
+                ["USER", "USER DN", "PARTITION", "PHONE", "SLOT", "CURRENT", "ASSOCIATION", "DN ACTION"],
+                [
+                    new ModuleTableRow(
+                        "assign",
+                        [
+                            user.DisplayName ?? reviewUserId,
+                            did.Pattern,
+                            DisplayPartition(reviewUserResolvedPartition),
+                            reviewPhoneName,
+                            reviewSlot.ToString(),
+                            Clean(currentLine?.Pattern),
+                            alreadyAssociated ? "Keep existing" : "Add to user",
+                            existing is null ? "Create in CUCM" : "Use existing CUCM DN",
+                        ],
+                        [
+                            "users", "assign", reviewUserId, reviewPhoneName, reviewSlot.ToString(),
+                            did.Pattern, did.RoutePartitionName ?? string.Empty,
+                            reviewUserResolvedPartition ?? string.Empty,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            ["assign", var assignmentUserId, var assignmentPhoneName, var assignmentSlotText,
+                var assignmentPattern, var inventoryPartition, var assignmentUserResolvedPartition] &&
+            int.TryParse(assignmentSlotText, out var assignmentSlot) && assignmentSlot > 0)
+        {
+            var user = await RequireUserAsync(cucm, assignmentUserId, context.CancellationToken);
+            var did = await RequireAvailableUserDidAsync(
+                context,
+                assignmentPattern,
+                inventoryPartition);
+            if (!string.Equals(
+                UserDidStore.NormalizeUserExtension(user.TelephoneNumber),
+                did.Pattern,
+                StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"CUCM user '{assignmentUserId}' no longer maps to DN '{did.Pattern}'.");
+            }
+            var phone = await RequirePhoneAsync(
+                cucm,
+                assignmentPhoneName,
+                context.CancellationToken);
+            EnsurePhoneCanBeAssignedToUser(phone, assignmentUserId);
+            var effectivePartition = Normalize(assignmentUserResolvedPartition);
+            var existing = await cucm.GetDirectoryNumberAsync(
+                did.Pattern,
+                effectivePartition,
+                context.CancellationToken);
+            EnsureUserDidCanBeAssigned(did, existing);
+            if (existing is null)
+            {
+                await cucm.AddDirectoryNumberAsync(
+                    new CucmDirectoryNumberCreateRequest(
+                        did.Pattern,
+                        effectivePartition,
+                        did.Description,
+                        did.CallingSearchSpaceName,
+                        did.VoiceMailProfileName),
+                    context.CancellationToken);
+            }
+
+            var previousDevices = user.AssociatedDevices.ToArray();
+            var addAssociation = !previousDevices.Contains(
+                assignmentPhoneName,
+                StringComparer.OrdinalIgnoreCase);
+            if (addAssociation)
+            {
+                await cucm.UpdateUserAssociatedDevicesAsync(
+                    assignmentUserId,
+                    previousDevices.Append(assignmentPhoneName),
+                    context.CancellationToken);
+            }
+            try
+            {
+                await cucm.AssignPhoneLineDirectoryNumberToUserAsync(
+                    assignmentPhoneName,
+                    assignmentSlot,
+                    did.Pattern,
+                    effectivePartition,
+                    assignmentUserId,
+                    context.CancellationToken);
+            }
+            catch (Exception assignmentException)
+            {
+                if (addAssociation)
+                {
+                    try
+                    {
+                        await cucm.UpdateUserAssociatedDevicesAsync(
+                            assignmentUserId,
+                            previousDevices,
+                            context.CancellationToken);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        throw new InvalidOperationException(
+                            "The phone update failed, and the user-device association could not " +
+                            "be rolled back.",
+                            new AggregateException(assignmentException, rollbackException));
+                    }
+                }
+                throw;
+            }
+            await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
+                did.Pattern,
+                did.RoutePartitionName,
+                assignmentPhoneName,
+                assignmentSlot,
+                assignmentUserId,
+                effectivePartition,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Assigned phone '{assignmentPhoneName}' and DN '{did.Pattern}' " +
+                $"to CUCM user '{assignmentUserId}'.");
+            return 0;
+        }
 
         context.Error.WriteLine(
             "Usage: vt cucm users list [--max <count>] [--page-size <count>]");
@@ -130,6 +332,85 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
     {
         context.Error.WriteLine(exception.Message);
         return 1;
+    }
+}
+
+static string UserDnStatus(
+    string? userId,
+    string? extension,
+    IReadOnlyList<UserDid> dids)
+{
+    if (extension is null)
+    {
+        return "No four-digit LDAP DN";
+    }
+    var did = dids.FirstOrDefault(candidate =>
+        candidate.Pattern.Equals(extension, StringComparison.Ordinal));
+    if (did is null)
+    {
+        return "Not in local pool";
+    }
+    if (did.Assignment is null)
+    {
+        return "Available";
+    }
+    return string.Equals(did.Assignment.UserId, userId, StringComparison.OrdinalIgnoreCase)
+        ? $"Assigned to {did.Assignment.PhoneName}"
+        : $"Assigned to {did.Assignment.UserId ?? did.Assignment.PhoneName}";
+}
+
+static async Task<UserDid?> FindUserDidAsync(ModuleContext context, string? extension)
+{
+    if (extension is null)
+    {
+        return null;
+    }
+    var matches = (await new UserDidStore(context.DataDirectory)
+        .LoadAsync(context.CancellationToken))
+        .Where(did => did.Pattern.Equals(extension, StringComparison.Ordinal))
+        .ToArray();
+    return matches.Length switch
+    {
+        0 => null,
+        1 => matches[0],
+        _ => throw new InvalidOperationException(
+            $"User DN '{extension}' appears more than once in the local inventory."),
+    };
+}
+
+static async Task<UserDid> RequireAvailableUserDidForUserAsync(
+    ModuleContext context,
+    CucmUser user)
+{
+    var extension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber) ??
+        throw new InvalidOperationException(
+            $"CUCM user '{user.UserId}' does not have a usable four-digit LDAP telephone number.");
+    var did = await FindUserDidAsync(context, extension) ??
+        throw new InvalidOperationException(
+            $"CUCM user '{user.UserId}' maps to DN '{extension}', which is not in the local pool.");
+    if (did.Assignment is not null)
+    {
+        throw new InvalidOperationException(
+            $"User DN '{extension}' is already assigned to '{did.Assignment.PhoneName}'.");
+    }
+    return did;
+}
+
+static async Task<CucmUser> RequireUserAsync(
+    CucmService cucm,
+    string userId,
+    CancellationToken cancellationToken) =>
+    await cucm.GetUserAsync(userId, cancellationToken) ??
+        throw new InvalidOperationException($"CUCM user '{userId}' was not found.");
+
+static void EnsurePhoneCanBeAssignedToUser(CucmPhone phone, string userId)
+{
+    if (!string.IsNullOrWhiteSpace(phone.OwnerUserName) &&
+        !phone.OwnerUserName.Equals(userId, StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException(
+            $"CUCM phone '{phone.Name}' is owned by '{phone.OwnerUserName}' and cannot be " +
+            $"assigned to '{userId}'.");
     }
 }
 
@@ -207,7 +488,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["phones", "lines", phoneName]),
                     new ModuleTableRow(
                         "assign-user-did",
-                        ["Assign user DID to slot", "Select an available DID for a line index"],
+                        ["Assign user DN to slot", "Select an available user DN for a line index"],
                         ["phones", "assign-slot", phoneName]),
                     new ModuleTableRow(
                         "checks",
@@ -325,7 +606,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["phones", "dn", phoneNameForLine, lineIndex.ToString()]),
                     new ModuleTableRow(
                         "assign-user-did",
-                        ["Assign available user DID", "Select from the local approved inventory"],
+                        ["Assign available user DN", "Select from the local approved inventory"],
                         ["phones", "dids", phoneNameForLine, lineIndex.ToString()]),
                     new ModuleTableRow(
                         "set-label",
@@ -372,9 +653,11 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 did.Pattern,
                 did.RoutePartitionName,
                 context.CancellationToken);
+            EnsureUserDidCanBeAssigned(did, existing);
+            var reviewResolvedPartition = existing?.RoutePartitionName ?? did.RoutePartitionName;
             await context.RespondAsync(new ModuleTableResponse(
-                "Review user DID assignment",
-                ["PHONE", "SLOT", "CURRENT", "USER DID", "PARTITION", "DN ACTION", "OWNER"],
+                "Review user DN assignment",
+                ["PHONE", "SLOT", "CURRENT", "USER DN", "PARTITION", "DN ACTION", "OWNER"],
                 [
                     new ModuleTableRow(
                         "assign",
@@ -383,20 +666,22 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                             reviewIndex.ToString(),
                             string.IsNullOrWhiteSpace(line?.Pattern) ? "<Empty>" : Clean(line.Pattern),
                             did.Pattern,
-                            DisplayPartition(did.RoutePartitionName),
+                            DisplayPartition(reviewResolvedPartition),
                             existing is null ? "Create in CUCM" : "Use existing CUCM DN",
                             Clean(phone.OwnerUserName),
                         ],
                         [
                             "phones", "assign-did", phoneNameForDidReview, reviewIndex.ToString(),
                             did.Pattern, did.RoutePartitionName ?? string.Empty,
+                            reviewResolvedPartition ?? string.Empty,
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
             return 0;
         }
         if (context.Arguments is
-            ["assign-did", var phoneNameForDidAssignment, var assignmentIndexText, var assignmentPattern, var assignmentPartition] &&
+            ["assign-did", var phoneNameForDidAssignment, var assignmentIndexText,
+                var assignmentPattern, var inventoryPartition, var assignmentResolvedPartition] &&
             int.TryParse(assignmentIndexText, out var assignmentIndex) && assignmentIndex > 0)
         {
             var phone = await RequirePhoneAsync(
@@ -406,17 +691,18 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             var did = await RequireAvailableUserDidAsync(
                 context,
                 assignmentPattern,
-                assignmentPartition);
+                inventoryPartition);
             var existing = await cucm.GetDirectoryNumberAsync(
                 did.Pattern,
-                did.RoutePartitionName,
+                Normalize(assignmentResolvedPartition),
                 context.CancellationToken);
+            EnsureUserDidCanBeAssigned(did, existing);
             if (existing is null)
             {
                 await cucm.AddDirectoryNumberAsync(
                     new CucmDirectoryNumberCreateRequest(
                         did.Pattern,
-                        did.RoutePartitionName,
+                        Normalize(assignmentResolvedPartition),
                         did.Description,
                         did.CallingSearchSpaceName,
                         did.VoiceMailProfileName),
@@ -426,7 +712,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phoneNameForDidAssignment,
                 assignmentIndex,
                 did.Pattern,
-                did.RoutePartitionName,
+                Normalize(assignmentResolvedPartition),
                 context.CancellationToken);
             await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
                 did.Pattern,
@@ -434,9 +720,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phoneNameForDidAssignment,
                 assignmentIndex,
                 phone.OwnerUserName,
+                Normalize(assignmentResolvedPartition),
                 context.CancellationToken);
             context.Output.WriteLine(
-                $"Assigned user DID '{did.Pattern}' to line {assignmentIndex} on {phoneNameForDidAssignment}" +
+                $"Assigned user DN '{did.Pattern}' to line {assignmentIndex} on {phoneNameForDidAssignment}" +
                 (existing is null ? " after creating the DN in CUCM." : "."));
             return 0;
         }
@@ -503,7 +790,7 @@ static async Task RespondWithAvailableUserDidsAsync(
         .Where(did => did.Assignment is null)
         .ToArray();
     await context.RespondAsync(new ModuleTableResponse(
-        $"Available user DIDs for line {lineIndex} on {phoneName}",
+        $"Available user DNs for line {lineIndex} on {phoneName}",
         ["DID", "PARTITION", "DESCRIPTION", "STATUS"],
         available.Select(did => new ModuleTableRow(
             $"{did.Pattern}:{did.RoutePartitionName}",
@@ -511,14 +798,14 @@ static async Task RespondWithAvailableUserDidsAsync(
                 did.Pattern,
                 DisplayPartition(did.RoutePartitionName),
                 Clean(did.Description),
-                HasResolvedUserDidLocation(did) ? "Ready" : "Location defaults required",
+                string.IsNullOrWhiteSpace(did.RoutePartitionName)
+                    ? "Resolve from CUCM"
+                    : "Ready",
             ],
-            HasResolvedUserDidLocation(did)
-                ? [
-                    "phones", "did-review", phoneName, lineIndex.ToString(),
-                    did.Pattern, did.RoutePartitionName!,
-                ]
-                : null)).ToArray()));
+            [
+                "phones", "did-review", phoneName, lineIndex.ToString(),
+                did.Pattern, did.RoutePartitionName ?? string.Empty,
+            ])).ToArray()));
 }
 
 static async ValueTask<int> UserDidsAsync(ModuleContext context)
@@ -529,17 +816,21 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
         if (context.Arguments.Count == 0)
         {
             await context.RespondAsync(new ModuleTableResponse(
-                "User DID inventory",
+                "User DN inventory",
                 ["ACTION", "DETAIL"],
                 [
                     new ModuleTableRow(
                         "list",
-                        ["List", "Browse available and assigned user DIDs"],
+                        ["List", "Browse available and assigned user DNs"],
                         ["dids", "list"]),
                     new ModuleTableRow(
                         "add",
-                        ["Add", "Import comma-separated DIDs or a numeric start..end range"],
+                        ["Add", "Import comma-separated four-digit DNs or a numeric start..end range"],
                         ["dids", "add"]),
+                    new ModuleTableRow(
+                        "replace",
+                        ["Replace", "Replace the unassigned inventory after Save confirmation"],
+                        ["dids", "replace"]),
                 ]));
             return 0;
         }
@@ -547,13 +838,14 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
         {
             var dids = await store.LoadAsync(context.CancellationToken);
             await context.RespondAsync(new ModuleTableResponse(
-                "Local user DID inventory",
+                "Local user DN inventory",
                 ["DID", "PARTITION", "STATUS", "USER", "PHONE", "SLOT"],
                 dids.Select(did => new ModuleTableRow(
                     $"{did.Pattern}:{did.RoutePartitionName}",
                     [
                         did.Pattern,
-                        DisplayPartition(did.RoutePartitionName),
+                        DisplayPartition(
+                            did.Assignment?.RoutePartitionName ?? did.RoutePartitionName),
                         did.Assignment is null ? "Available" : "Assigned",
                         Clean(did.Assignment?.UserId),
                         Clean(did.Assignment?.PhoneName),
@@ -565,9 +857,51 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
         if (context.Arguments is ["add"])
         {
             await context.RespondAsync(new ModuleTextPromptResponse(
-                "Add user DIDs",
-                "Comma-separated DIDs or numeric start..end range",
+                "Add user DNs",
+                "Comma-separated four-digit DNs or numeric start..end range",
                 ["dids", "add-values"]));
+            return 0;
+        }
+        if (context.Arguments is ["replace"])
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                "Replace user DNs",
+                "Comma-separated four-digit extensions or numeric start..end range",
+                ["dids", "replace-review"]));
+            return 0;
+        }
+        if (context.Arguments is ["replace-review", var replacementValues])
+        {
+            var replacementPatterns = UserDidStore.ParsePatterns(replacementValues);
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review user DN inventory replacement",
+                ["ACTION", "NEW COUNT", "FIRST", "LAST"],
+                [
+                    new ModuleTableRow(
+                        "replace",
+                        [
+                            "Replace inventory",
+                            replacementPatterns.Count.ToString(),
+                            replacementPatterns.Order(StringComparer.Ordinal).First(),
+                            replacementPatterns.Order(StringComparer.Ordinal).Last(),
+                        ],
+                        ["dids", "replace-values", replacementValues]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is ["replace-values", var confirmedReplacementValues])
+        {
+            var replacementPatterns = UserDidStore.ParsePatterns(confirmedReplacementValues);
+            await store.ReplaceAsync(
+                replacementPatterns,
+                context.Configuration.GetValueOrDefault("user-did-partition"),
+                context.Configuration.GetValueOrDefault("user-did-description-prefix"),
+                context.Configuration.GetValueOrDefault("user-did-css"),
+                context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Replaced the local inventory with {replacementPatterns.Count} user DNs.");
             return 0;
         }
         if (context.Arguments.Count == 2 &&
@@ -583,13 +917,13 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                 context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
                 context.CancellationToken);
             context.Output.WriteLine(
-                $"Added {added} user DID{(added == 1 ? string.Empty : "s")}; " +
+                $"Added {added} user DN{(added == 1 ? string.Empty : "s")}; " +
                 $"{patterns.Count - added} already existed in the local inventory.");
             return 0;
         }
 
         context.Error.WriteLine(
-            "Usage: vt cucm dids [list|add [<did,did|start..end>]]");
+            "Usage: vt cucm dids [list|add [<dn,dn|start..end>]|replace]");
         return 2;
     }
     catch (Exception exception) when (IsExpected(exception))
@@ -611,18 +945,21 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
             string.Equals(candidate.RoutePartitionName, partition, StringComparison.Ordinal));
     return did is null
         ? throw new InvalidOperationException(
-            $"User DID '{pattern}' is not present in the local inventory.")
+            $"User DN '{pattern}' is not present in the local inventory.")
         : did.Assignment is not null
-            ? throw new InvalidOperationException($"User DID '{pattern}' is no longer available.")
-            : !HasResolvedUserDidLocation(did)
-                ? throw new InvalidOperationException(
-                    $"User DID '{pattern}' has no route partition. Resolve its location-specific " +
-                    "CUCM defaults before assigning it.")
+            ? throw new InvalidOperationException($"User DN '{pattern}' is no longer available.")
             : did;
 }
 
-static bool HasResolvedUserDidLocation(UserDid did) =>
-    !string.IsNullOrWhiteSpace(did.RoutePartitionName);
+static void EnsureUserDidCanBeAssigned(UserDid did, CucmDirectoryNumber? existing)
+{
+    if (existing is null && string.IsNullOrWhiteSpace(did.RoutePartitionName))
+    {
+        throw new InvalidOperationException(
+            $"User DN '{did.Pattern}' does not exist in CUCM and has no route partition. " +
+            "Configure its location-specific defaults before creating it.");
+    }
+}
 
 static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
 {
