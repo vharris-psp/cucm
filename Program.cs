@@ -520,6 +520,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         "checks",
                         ["Check configuration", "Validate this phone against a named profile"],
                         ["phones", "check", phoneName]),
+                    new ModuleTableRow(
+                        "edit",
+                        ["Edit", "Update description, device pool, and owner"],
+                        ["phones", "edit", phoneName]),
                 ]));
             return 0;
         }
@@ -793,9 +797,224 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 $"Updated line {updateIndex} on {phoneNameToUpdate} with label '{newLabel}'.");
             return 0;
         }
+        if (context.Arguments is ["add"])
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                "Add CUCM phone",
+                "Phone name",
+                ["phones", "add-description"]));
+            return 0;
+        }
+        if (context.Arguments is ["add-description", var addName] &&
+            !string.IsNullOrWhiteSpace(addName))
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Add phone {addName}",
+                "Description",
+                ["phones", "add-product", addName],
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is ["add-product", var productPhoneName, var productDescription])
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Add phone {productPhoneName}",
+                "Product (e.g. \"Cisco 8841\")",
+                ["phones", "add-device-pool", productPhoneName, productDescription]));
+            return 0;
+        }
+        if (context.Arguments is
+            ["add-device-pool", var devicePoolPhoneName, var devicePoolDescription, var devicePoolProduct] &&
+            !string.IsNullOrWhiteSpace(devicePoolProduct))
+        {
+            await RespondWithPhoneNamedSelectorAsync(
+                context,
+                cucm,
+                "Select device pool",
+                "add-template",
+                new PhoneWizardState(
+                    devicePoolPhoneName,
+                    Normalize(devicePoolDescription),
+                    devicePoolProduct),
+                "device-pool",
+                allowNone: false);
+            return 0;
+        }
+        if (TryParsePhoneWizardState(context.Arguments, "add-template", out var templateState))
+        {
+            await RespondWithPhoneNamedSelectorAsync(
+                context,
+                cucm,
+                "Select phone button template",
+                "add-security-profile",
+                templateState,
+                "phone-template",
+                allowNone: true);
+            return 0;
+        }
+        if (TryParsePhoneWizardState(
+            context.Arguments,
+            "add-security-profile",
+            out var securityProfileState))
+        {
+            await RespondWithPhoneNamedSelectorAsync(
+                context,
+                cucm,
+                "Select security profile",
+                "add-owner",
+                securityProfileState,
+                "security-profile",
+                allowNone: true);
+            return 0;
+        }
+        if (TryParsePhoneWizardState(context.Arguments, "add-owner", out var ownerState))
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Add phone {ownerState.Name}",
+                "Owner user ID",
+                PhoneWizardArguments("add-review-value", ownerState),
+                AllowEmpty: true));
+            return 0;
+        }
+        if (TryParsePhoneWizardStateWithValue(
+            context.Arguments,
+            "add-review-value",
+            out var reviewValueState,
+            out var ownerValue))
+        {
+            await RespondWithPhoneCreateReviewAsync(
+                context,
+                reviewValueState with { OwnerUserName = Normalize(ownerValue) });
+            return 0;
+        }
+        if (TryParsePhoneWizardState(context.Arguments, "add-create", out var createState))
+        {
+            var uuid = await cucm.AddPhoneAsync(
+                createState.ToCreateRequest(),
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Created phone '{createState.Name}'" +
+                (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid})."));
+            return 0;
+        }
+        if (context.Arguments is ["edit", var editPhoneName])
+        {
+            var phone = await RequirePhoneAsync(cucm, editPhoneName, context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Edit phone {editPhoneName}",
+                "Description",
+                ["phones", "edit-device-pool", editPhoneName],
+                phone.Description,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            ["edit-device-pool", var devicePoolEditPhoneName, var editDescriptionRaw])
+        {
+            var editDescription = Normalize(editDescriptionRaw);
+            var rows = new List<ModuleTableRow>
+            {
+                new(
+                    "keep",
+                    ["<Keep current>", string.Empty],
+                    [
+                        "phones", "edit-owner", devicePoolEditPhoneName,
+                        editDescription ?? string.Empty, string.Empty,
+                    ]),
+            };
+            await foreach (var pool in cucm.ListDevicePoolsAsync(
+                cancellationToken: context.CancellationToken))
+            {
+                if (string.IsNullOrWhiteSpace(pool.Name))
+                {
+                    continue;
+                }
+                rows.Add(new ModuleTableRow(
+                    pool.Uuid ?? $"device-pool:{pool.Name}",
+                    [Clean(pool.Name), Clean(pool.Description)],
+                    [
+                        "phones", "edit-owner", devicePoolEditPhoneName,
+                        editDescription ?? string.Empty, pool.Name,
+                    ]));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Select device pool",
+                ["NAME", "DESCRIPTION"],
+                rows,
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            ["edit-owner", var ownerEditPhoneName, var ownerEditDescriptionRaw, var ownerEditDevicePoolRaw])
+        {
+            var phone = await RequirePhoneAsync(
+                cucm,
+                ownerEditPhoneName,
+                context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Edit phone {ownerEditPhoneName}",
+                "Owner user ID",
+                [
+                    "phones", "edit-review", ownerEditPhoneName,
+                    ownerEditDescriptionRaw, ownerEditDevicePoolRaw,
+                ],
+                phone.OwnerUserName,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "edit-review", var reviewPhoneName, var reviewDescriptionRaw, var reviewDevicePoolRaw,
+                var reviewOwnerRaw,
+            ])
+        {
+            // Empty values mean "leave unchanged" (UpdatePhoneAsync omits null fields), so
+            // reviewing an intentional blank-out isn't distinguishable from "no change" here.
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Review changes to {reviewPhoneName}",
+                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER"],
+                [
+                    new ModuleTableRow(
+                        "submit",
+                        [
+                            reviewPhoneName,
+                            string.IsNullOrWhiteSpace(reviewDescriptionRaw)
+                                ? "<Unchanged>"
+                                : Clean(reviewDescriptionRaw),
+                            string.IsNullOrWhiteSpace(reviewDevicePoolRaw)
+                                ? "<Unchanged>"
+                                : Clean(reviewDevicePoolRaw),
+                            string.IsNullOrWhiteSpace(reviewOwnerRaw)
+                                ? "<Unchanged>"
+                                : Clean(reviewOwnerRaw),
+                        ],
+                        [
+                            "phones", "edit-update", reviewPhoneName,
+                            reviewDescriptionRaw, reviewDevicePoolRaw, reviewOwnerRaw,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "edit-update", var updatePhoneName, var updateDescriptionRaw, var updateDevicePoolRaw,
+                var updateOwnerRaw,
+            ])
+        {
+            await cucm.UpdatePhoneAsync(
+                updatePhoneName,
+                Normalize(updateDescriptionRaw),
+                Normalize(updateDevicePoolRaw),
+                Normalize(updateOwnerRaw),
+                context.CancellationToken);
+            context.Output.WriteLine($"Updated phone '{updatePhoneName}'.");
+            return 0;
+        }
 
         context.Error.WriteLine(
             "Usage: vt cucm phones list [--max <count>] [--page-size <count>]\n" +
+            "       vt cucm phones add\n" +
             "       vt cucm phones check <phone> [basic-room|classroom]");
         return 2;
     }
@@ -1013,7 +1232,7 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                     ],
                     string.IsNullOrWhiteSpace(rowPattern)
                         ? null
-                        : DirectoryNumberInfoArguments(rowPattern, rowPartition)));
+                        : DirectoryNumberPatternArguments("select", rowPattern, rowPartition)));
             }
             await context.RespondAsync(new ModuleTableResponse(
                 "CUCM directory numbers",
@@ -1021,19 +1240,214 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 rows));
             return 0;
         }
-        if (TryParseDirectoryNumberInfoArguments(
+        if (TryParseDirectoryNumberPatternArguments(
             context.Arguments,
+            "select",
+            out var selectPattern,
+            out var selectPartition))
+        {
+            var selected = await RequireDirectoryNumberAsync(
+                cucm,
+                selectPattern,
+                selectPartition,
+                context.CancellationToken);
+            var selectedPartition = selected.RoutePartitionName ?? selectPartition;
+            await context.RespondAsync(new ModuleTableResponse(
+                $"CUCM directory number: {selected.Pattern}",
+                ["ACTION", "DETAIL"],
+                [
+                    new ModuleTableRow(
+                        "info",
+                        ["View details", Clean(selected.Description)],
+                        DirectoryNumberPatternArguments("info", selectPattern, selectedPartition)),
+                    new ModuleTableRow(
+                        "edit",
+                        [
+                            "Edit",
+                            "Update description, CSS, voicemail profile, and forwarding",
+                        ],
+                        DirectoryNumberPatternArguments("edit", selectPattern, selectedPartition)),
+                    new ModuleTableRow(
+                        "delete",
+                        ["Delete", "Remove this directory number from CUCM"],
+                        DirectoryNumberPatternArguments("delete", selectPattern, selectedPartition)),
+                ]));
+            return 0;
+        }
+        if (TryParseDirectoryNumberPatternArguments(
+            context.Arguments,
+            "info",
             out var infoPattern,
             out var infoPartition))
         {
-            var line = await cucm.GetDirectoryNumberAsync(
+            var line = await RequireDirectoryNumberAsync(
+                cucm,
                 infoPattern,
                 infoPartition,
-                context.CancellationToken) ??
-                throw new InvalidOperationException(
-                    $"CUCM directory number '{infoPattern}' in partition " +
-                    $"'{DisplayPartition(infoPartition)}' was not found.");
+                context.CancellationToken);
             await RespondWithDirectoryNumberInfoAsync(context, line);
+            return 0;
+        }
+        if (TryParseDirectoryNumberPatternArguments(
+            context.Arguments,
+            "edit",
+            out var editPattern,
+            out var editPartition))
+        {
+            var current = await RequireDirectoryNumberAsync(
+                cucm,
+                editPattern,
+                editPartition,
+                context.CancellationToken);
+            var editState = new DnWizardState(
+                current.Pattern ?? editPattern,
+                current.Description,
+                current.RoutePartitionName ?? editPartition,
+                current.CallingSearchSpaceName,
+                current.VoiceMailProfileName,
+                current.CallForwardAll.Destination,
+                current.CallForwardAll.CallingSearchSpaceName,
+                current.CallForwardAll.ForwardToVoiceMail);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Edit directory number {editState.Pattern}",
+                "Description",
+                WizardArguments("edit-css", editState),
+                editState.Description,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (TryParseWizardStateWithOptionalValue(context.Arguments, "edit-css", out var editCssBaseState, out var editDescription))
+        {
+            await RespondWithNamedSelectorAsync(
+                context,
+                cucm,
+                "Select line calling search space",
+                "edit-voicemail-profile",
+                editCssBaseState with { Description = Normalize(editDescription) },
+                "css");
+            return 0;
+        }
+        if (TryParseWizardState(context.Arguments, "edit-voicemail-profile", out var editCssState))
+        {
+            await RespondWithNamedSelectorAsync(
+                context,
+                cucm,
+                "Select voicemail profile",
+                "edit-forward",
+                editCssState,
+                "voicemail-profile");
+            return 0;
+        }
+        if (TryParseWizardState(context.Arguments, "edit-forward", out var editVoicemailState))
+        {
+            await RespondWithForwardingSelectorAsync(
+                context,
+                editVoicemailState,
+                "edit-review",
+                "edit-forward-destination",
+                "edit-forward-voicemail");
+            return 0;
+        }
+        if (TryParseWizardState(
+            context.Arguments,
+            "edit-forward-destination",
+            out var editDestinationState))
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                "Configure forward all",
+                "Forward destination",
+                WizardArguments("edit-forward-destination-value", editDestinationState)));
+            return 0;
+        }
+        if (TryParseWizardStateWithValue(
+            context.Arguments,
+            "edit-forward-destination-value",
+            out var editDestinationValueState,
+            out var editForwardDestination))
+        {
+            await RespondWithNamedSelectorAsync(
+                context,
+                cucm,
+                "Select forward-all calling search space",
+                "edit-review",
+                editDestinationValueState with { ForwardDestination = editForwardDestination },
+                "forward-css");
+            return 0;
+        }
+        if (TryParseWizardState(
+            context.Arguments,
+            "edit-forward-voicemail",
+            out var editVoicemailForwardState))
+        {
+            await RespondWithNamedSelectorAsync(
+                context,
+                cucm,
+                "Select forward-all calling search space",
+                "edit-review",
+                editVoicemailForwardState with { ForwardToVoiceMail = true },
+                "forward-css");
+            return 0;
+        }
+        if (TryParseWizardState(context.Arguments, "edit-review", out var editReviewState))
+        {
+            await RespondWithDirectoryNumberReviewAsync(
+                context,
+                editReviewState,
+                "Review directory number changes",
+                "edit-update");
+            return 0;
+        }
+        if (TryParseWizardState(context.Arguments, "edit-update", out var editUpdateState))
+        {
+            await cucm.UpdateDirectoryNumberAsync(
+                editUpdateState.ToUpdateRequest(),
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated directory number '{editUpdateState.Pattern}' in partition " +
+                $"'{DisplayPartition(editUpdateState.RoutePartitionName)}'.");
+            return 0;
+        }
+        if (TryParseDirectoryNumberPatternArguments(
+            context.Arguments,
+            "delete",
+            out var deletePattern,
+            out var deletePartition))
+        {
+            var toDelete = await RequireDirectoryNumberAsync(
+                cucm,
+                deletePattern,
+                deletePartition,
+                context.CancellationToken);
+            var deletePartitionResolved = toDelete.RoutePartitionName ?? deletePartition;
+            await context.RespondAsync(new ModuleTableResponse(
+                "Confirm delete",
+                ["PATTERN", "PARTITION", "DESCRIPTION"],
+                [
+                    new ModuleTableRow(
+                        "confirm",
+                        [
+                            Clean(toDelete.Pattern),
+                            DisplayPartition(deletePartitionResolved),
+                            Clean(toDelete.Description),
+                        ],
+                        [
+                            "dn", "delete-confirm", deletePattern,
+                            deletePartitionResolved ?? string.Empty,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is ["delete-confirm", var confirmPattern, var confirmPartitionRaw])
+        {
+            var confirmPartition = Normalize(confirmPartitionRaw);
+            await cucm.DeleteDirectoryNumberAsync(
+                confirmPattern,
+                confirmPartition,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Deleted directory number '{confirmPattern}' from partition " +
+                $"'{DisplayPartition(confirmPartition)}'.");
             return 0;
         }
         if (context.Arguments is ["add"])
@@ -1091,7 +1505,12 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
         }
         if (TryParseWizardState(context.Arguments, "add-forward", out var forwardingState))
         {
-            await RespondWithForwardingSelectorAsync(context, forwardingState);
+            await RespondWithForwardingSelectorAsync(
+                context,
+                forwardingState,
+                "add-review",
+                "add-forward-destination",
+                "add-forward-voicemail");
             return 0;
         }
         if (TryParseWizardState(
@@ -1136,7 +1555,11 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
         }
         if (TryParseWizardState(context.Arguments, "add-review", out var reviewState))
         {
-            await RespondWithDirectoryNumberReviewAsync(context, reviewState);
+            await RespondWithDirectoryNumberReviewAsync(
+                context,
+                reviewState,
+                "Review directory number",
+                "add-create");
             return 0;
         }
         if (TryParseWizardState(context.Arguments, "add-create", out var createState))
@@ -1250,7 +1673,12 @@ static async Task RespondWithNamedSelectorAsync(
         SubmitMode: ModuleTableSubmitMode.Save));
 }
 
-static Task RespondWithForwardingSelectorAsync(ModuleContext context, DnWizardState state) =>
+static Task RespondWithForwardingSelectorAsync(
+    ModuleContext context,
+    DnWizardState state,
+    string disabledRoute,
+    string destinationRoute,
+    string voicemailRoute) =>
     context.RespondAsync(new ModuleTableResponse(
         "Configure forward all",
         ["OPTION", "DETAIL"],
@@ -1258,21 +1686,23 @@ static Task RespondWithForwardingSelectorAsync(ModuleContext context, DnWizardSt
             new ModuleTableRow(
                 "disabled",
                 ["Disabled", "Do not forward all calls"],
-                WizardArguments("add-review", state)),
+                WizardArguments(disabledRoute, state)),
             new ModuleTableRow(
                 "destination",
                 ["Destination", "Forward all calls to a number"],
-                WizardArguments("add-forward-destination", state)),
+                WizardArguments(destinationRoute, state)),
             new ModuleTableRow(
                 "voicemail",
                 ["Voicemail", "Forward all calls to voicemail"],
-                WizardArguments("add-forward-voicemail", state)),
+                WizardArguments(voicemailRoute, state)),
         ],
         SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
 
 static Task RespondWithDirectoryNumberReviewAsync(
     ModuleContext context,
-    DnWizardState state)
+    DnWizardState state,
+    string title,
+    string submitRoute)
 {
     var forwarding = state.ForwardToVoiceMail
         ? "Voicemail"
@@ -1280,11 +1710,11 @@ static Task RespondWithDirectoryNumberReviewAsync(
             ? "Disabled"
             : state.ForwardDestination;
     return context.RespondAsync(new ModuleTableResponse(
-        "Review directory number",
+        title,
         ["PATTERN", "PARTITION", "DESCRIPTION", "CSS", "VOICEMAIL", "FORWARD ALL", "FORWARD CSS"],
         [
             new ModuleTableRow(
-                "create",
+                "submit",
                 [
                     Clean(state.Pattern),
                     DisplayPartition(state.RoutePartitionName),
@@ -1294,7 +1724,7 @@ static Task RespondWithDirectoryNumberReviewAsync(
                     Clean(forwarding),
                     Clean(state.ForwardCallingSearchSpaceName),
                 ],
-                WizardArguments("add-create", state)),
+                WizardArguments(submitRoute, state)),
             ],
             SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
 }
@@ -1311,19 +1741,149 @@ static DnWizardState SetWizardResource(
     _ => throw new InvalidOperationException($"Unknown CUCM resource type '{resourceType}'."),
 };
 
-static IReadOnlyList<string> DirectoryNumberInfoArguments(string pattern, string partition) =>
-    string.IsNullOrWhiteSpace(partition)
-        ? ["dn", "info", pattern]
-        : ["dn", "info", pattern, "--partition", partition];
+static async Task RespondWithPhoneNamedSelectorAsync(
+    ModuleContext context,
+    CucmService cucm,
+    string title,
+    string nextRoute,
+    PhoneWizardState state,
+    string resourceType,
+    bool allowNone)
+{
+    var rows = new List<ModuleTableRow>();
+    if (allowNone)
+    {
+        rows.Add(new ModuleTableRow(
+            $"none:{resourceType}",
+            ["<None>", string.Empty],
+            PhoneWizardArguments(nextRoute, state)));
+    }
+    var resources = resourceType switch
+    {
+        "device-pool" => cucm.ListDevicePoolsAsync(cancellationToken: context.CancellationToken),
+        "phone-template" => cucm.ListPhoneButtonTemplatesAsync(
+            cancellationToken: context.CancellationToken),
+        "security-profile" => cucm.ListPhoneSecurityProfilesAsync(
+            cancellationToken: context.CancellationToken),
+        _ => throw new InvalidOperationException(
+            $"Unknown CUCM phone resource type '{resourceType}'."),
+    };
+    await foreach (var resource in resources)
+    {
+        if (string.IsNullOrWhiteSpace(resource.Name))
+        {
+            continue;
+        }
+        rows.Add(new ModuleTableRow(
+            resource.Uuid ?? $"{resourceType}:{resource.Name}",
+            [Clean(resource.Name), Clean(resource.Description)],
+            PhoneWizardArguments(nextRoute, SetPhoneWizardResource(state, resourceType, resource.Name))));
+    }
+    await context.RespondAsync(new ModuleTableResponse(
+        title,
+        ["NAME", "DESCRIPTION"],
+        rows,
+        SubmitMode: ModuleTableSubmitMode.Save));
+}
 
-static bool TryParseDirectoryNumberInfoArguments(
+static PhoneWizardState SetPhoneWizardResource(
+    PhoneWizardState state,
+    string resourceType,
+    string value) => resourceType switch
+{
+    "device-pool" => state with { DevicePoolName = value },
+    "phone-template" => state with { PhoneTemplateName = value },
+    "security-profile" => state with { SecurityProfileName = value },
+    _ => throw new InvalidOperationException($"Unknown CUCM phone resource type '{resourceType}'."),
+};
+
+static Task RespondWithPhoneCreateReviewAsync(ModuleContext context, PhoneWizardState state) =>
+    context.RespondAsync(new ModuleTableResponse(
+        "Review new phone",
+        ["NAME", "DESCRIPTION", "PRODUCT", "DEVICE POOL", "PHONE TEMPLATE", "SECURITY PROFILE", "OWNER"],
+        [
+            new ModuleTableRow(
+                "submit",
+                [
+                    Clean(state.Name),
+                    Clean(state.Description),
+                    Clean(state.Product),
+                    Clean(state.DevicePoolName),
+                    Clean(state.PhoneTemplateName),
+                    Clean(state.SecurityProfileName),
+                    Clean(state.OwnerUserName),
+                ],
+                PhoneWizardArguments("add-create", state)),
+        ],
+        SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
+
+static IReadOnlyList<string> PhoneWizardArguments(string route, PhoneWizardState state) =>
+    [
+        "phones",
+        route,
+        state.Name,
+        state.Description ?? string.Empty,
+        state.Product ?? string.Empty,
+        state.DevicePoolName ?? string.Empty,
+        state.PhoneTemplateName ?? string.Empty,
+        state.SecurityProfileName ?? string.Empty,
+        state.OwnerUserName ?? string.Empty,
+    ];
+
+static bool TryParsePhoneWizardState(
     IReadOnlyList<string> arguments,
+    string route,
+    out PhoneWizardState state)
+{
+    state = new PhoneWizardState(string.Empty);
+    if (arguments.Count != 8 || arguments[0] != route)
+    {
+        return false;
+    }
+    state = new PhoneWizardState(
+        arguments[1],
+        Normalize(arguments[2]),
+        Normalize(arguments[3]),
+        Normalize(arguments[4]),
+        Normalize(arguments[5]),
+        Normalize(arguments[6]),
+        Normalize(arguments[7]));
+    return true;
+}
+
+static bool TryParsePhoneWizardStateWithValue(
+    IReadOnlyList<string> arguments,
+    string route,
+    out PhoneWizardState state,
+    out string value)
+{
+    state = new PhoneWizardState(string.Empty);
+    value = string.Empty;
+    if (arguments.Count != 9 || !TryParsePhoneWizardState(arguments.Take(8).ToArray(), route, out state))
+    {
+        return false;
+    }
+    value = arguments[8];
+    return true;
+}
+
+static IReadOnlyList<string> DirectoryNumberPatternArguments(
+    string verb,
+    string pattern,
+    string? partition) =>
+    string.IsNullOrWhiteSpace(partition)
+        ? ["dn", verb, pattern]
+        : ["dn", verb, pattern, "--partition", partition];
+
+static bool TryParseDirectoryNumberPatternArguments(
+    IReadOnlyList<string> arguments,
+    string verb,
     out string pattern,
     out string? partition)
 {
     pattern = string.Empty;
     partition = null;
-    if (arguments.Count < 2 || arguments[0] != "info" || string.IsNullOrWhiteSpace(arguments[1]))
+    if (arguments.Count < 2 || arguments[0] != verb || string.IsNullOrWhiteSpace(arguments[1]))
     {
         return false;
     }
@@ -1339,6 +1899,17 @@ static bool TryParseDirectoryNumberInfoArguments(
     }
     return false;
 }
+
+static async Task<CucmDirectoryNumber> RequireDirectoryNumberAsync(
+    CucmService cucm,
+    string pattern,
+    string? partition,
+    CancellationToken cancellationToken) =>
+    await cucm.GetDirectoryNumberAsync(pattern, partition, cancellationToken) ??
+        throw new InvalidOperationException(
+            $"CUCM directory number '{pattern}' in partition " +
+            $"'{DisplayPartition(partition)}' was not found.");
+
 
 static bool TryParseDirectoryNumberAddArguments(
     IReadOnlyList<string> arguments,
@@ -1480,10 +2051,30 @@ static bool TryParseWizardStateWithValue(
     return !string.IsNullOrWhiteSpace(value);
 }
 
+// Same shape as TryParseWizardStateWithValue, but for continuations whose value is allowed to
+// be blank (e.g. clearing a description), unlike a required field such as forward destination.
+static bool TryParseWizardStateWithOptionalValue(
+    IReadOnlyList<string> arguments,
+    string route,
+    out DnWizardState state,
+    out string value)
+{
+    state = new DnWizardState(string.Empty);
+    value = string.Empty;
+    if (arguments.Count != 10 || !TryParseWizardState(arguments.Take(9).ToArray(), route, out state))
+    {
+        return false;
+    }
+    value = arguments[9];
+    return true;
+}
+
 static void WriteDirectoryNumberUsage(ModuleContext context) =>
     context.Error.WriteLine(
         "Usage: vt cucm dn list [--max <count>] [--page-size <count>]\n" +
         "       vt cucm dn info <pattern> [--partition <name>]\n" +
+        "       vt cucm dn edit <pattern> [--partition <name>]\n" +
+        "       vt cucm dn delete <pattern> [--partition <name>]\n" +
         "       vt cucm dn add [<pattern> [--partition <name>] [--description <text>] " +
         "[--css <name>] [--voicemail-profile <name>] [--forward-destination <number>] " +
         "[--forward-css <name>] [--forward-to-voicemail]]");
@@ -1611,4 +2202,41 @@ sealed record DnWizardState(
             VoiceMailProfileName,
             callForwardAll);
     }
+
+    public CucmDirectoryNumberUpdateRequest ToUpdateRequest()
+    {
+        var callForwardAll = ForwardToVoiceMail || !string.IsNullOrWhiteSpace(ForwardDestination)
+            ? new CucmCallForwardSettings(
+                ForwardToVoiceMail,
+                ForwardCallingSearchSpaceName,
+                Destination: ForwardDestination)
+            : null;
+        return new CucmDirectoryNumberUpdateRequest(
+            Pattern,
+            RoutePartitionName,
+            Description,
+            CallingSearchSpaceName,
+            VoiceMailProfileName,
+            callForwardAll);
+    }
+}
+
+sealed record PhoneWizardState(
+    string Name,
+    string? Description = null,
+    string? Product = null,
+    string? DevicePoolName = null,
+    string? PhoneTemplateName = null,
+    string? SecurityProfileName = null,
+    string? OwnerUserName = null)
+{
+    public CucmPhoneCreateRequest ToCreateRequest() =>
+        new(
+            Name,
+            Product ?? string.Empty,
+            DevicePoolName ?? string.Empty,
+            Description,
+            PhoneTemplateName: PhoneTemplateName,
+            SecurityProfileName: SecurityProfileName,
+            OwnerUserName: OwnerUserName);
 }
