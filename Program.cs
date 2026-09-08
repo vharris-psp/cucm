@@ -40,7 +40,7 @@ return await ModuleApplication
         defaultValue: "User DID")
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
-    .Default("Run 'vt cucm users list', 'vt cucm phones list', or 'vt cucm dn list'.")
+    .Default(RootAsync)
     .Command(
         "users",
         "Browse CUCM users and their phones through AXL.",
@@ -67,6 +67,32 @@ return await ModuleApplication
         DirectoryNumbersAsync,
         ModuleResponseKind.Table)
     .RunAsync(args);
+
+static async ValueTask<int> RootAsync(ModuleContext context)
+{
+    await context.RespondAsync(new ModuleTableResponse(
+        "CUCM",
+        ["AREA", "DESCRIPTION"],
+        [
+            new ModuleTableRow(
+                "users",
+                ["Users", "Browse CUCM users and assign phones and DNs"],
+                ["users", "list"]),
+            new ModuleTableRow(
+                "phones",
+                ["Phones", "Browse CUCM phones and update line configuration"],
+                ["phones", "list"]),
+            new ModuleTableRow(
+                "dn",
+                ["Directory numbers", "List, inspect, and create CUCM directory numbers"],
+                ["dn", "list"]),
+            new ModuleTableRow(
+                "dids",
+                ["User DID inventory", "Manage the local approved inventory of user DNs"],
+                ["dids"]),
+        ]));
+    return 0;
+}
 
 static async ValueTask<int> UsersAsync(ModuleContext context)
 {
@@ -1180,7 +1206,9 @@ static async Task RespondWithDirectoryNumberInfoAsync(
             new ModuleTableRow(
                 "forward-css",
                 ["Forward-all CSS", Clean(cfa.CallingSearchSpaceName)]),
-        ]));
+        ],
+        Selectable: false,
+        Searchable: false));
 }
 
 static async Task RespondWithNamedSelectorAsync(
