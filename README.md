@@ -33,3 +33,19 @@ The phone-first flow remains available by opening a phone and choosing **Assign 
 For an existing four-digit CUCM DN, the module resolves and reuses the DN's actual route partition during review. If the DN does not exist, location-specific `user-did-*` defaults must be configured before the module will create it. The module never guesses a partition for a missing DN.
 
 The versioned JSON document is a temporary persistence boundary. A future DirSync or connector implementation can replace the local repository while retaining the same user-DID and assignment fields.
+
+## Directory numbers and phones
+
+`vt cucm dn` lists directory numbers; selecting one opens **Info**, **Edit**, or **Delete**. Edit walks through calling search space, voicemail profile, and forward-all, then saves via review. Delete requires review confirmation. `vt cucm dn add` remains for creating a new DN directly.
+
+`vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
+
+## Provisioning a phone from scratch
+
+`vt cucm provision` (or **Provision a phone** from the root menu) chains phone creation/claiming and user assignment into one guided flow:
+
+1. Choose **New phone** (walks through name, description, product, device pool, phone button template, security profile) or **Existing phone** (lists unowned CUCM phones).
+2. Select a CUCM user with an available DN in the local inventory; users without one are listed but not selectable.
+3. Review the phone, product, device pool, user, and DN, then save.
+
+Saving creates (or claims) the phone with the user as owner, adds the phone to the user's associated devices, creates the DN in CUCM if needed, assigns it to line 1, and records the assignment in the local inventory — reusing the same primitives as the DID and phone-assignment flows above. If line assignment fails after the phone is created/claimed, the error names the phone so it can be finished manually via `vt cucm phones select <name>`.

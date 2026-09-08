@@ -66,6 +66,11 @@ return await ModuleApplication
         "Alias for the CUCM directory-number command.",
         DirectoryNumbersAsync,
         ModuleResponseKind.Table)
+    .Command(
+        "provision",
+        "Provision a CUCM phone from scratch for a user (create/claim, assign DN, review, save).",
+        ProvisionAsync,
+        ModuleResponseKind.Table)
     .RunAsync(args);
 
 static async ValueTask<int> RootAsync(ModuleContext context)
@@ -90,8 +95,431 @@ static async ValueTask<int> RootAsync(ModuleContext context)
                 "dids",
                 ["User DID inventory", "Manage the local approved inventory of user DNs"],
                 ["dids"]),
+            new ModuleTableRow(
+                "provision",
+                ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
+                ["provision"]),
         ]));
     return 0;
+}
+
+// Composite wizard that chains the existing phone (add/edit) and user (assign) primitives into
+// a single guided flow: pick "new" or "existing" phone, select a user with an available local
+// DID, review, then create/claim the phone + assign the DID/line to that user in one submit.
+static async ValueTask<int> ProvisionAsync(ModuleContext context)
+{
+    try
+    {
+        using var cucm = await CreateCucmAsync(context);
+        if (context.Arguments.Count == 0)
+        {
+            await context.RespondAsync(new ModuleTableResponse(
+                "Provision a phone",
+                ["OPTION", "DETAIL"],
+                [
+                    new ModuleTableRow(
+                        "new",
+                        ["New phone", "Create a new CUCM phone from scratch"],
+                        ["provision", "new"]),
+                    new ModuleTableRow(
+                        "existing",
+                        ["Existing phone", "Claim an unowned CUCM phone"],
+                        ["provision", "existing"]),
+                ]));
+            return 0;
+        }
+        if (context.Arguments is ["new"])
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                "Provision a new phone",
+                "Phone name",
+                ["provision", "new-description"]));
+            return 0;
+        }
+        if (context.Arguments is ["new-description", var newName] &&
+            !string.IsNullOrWhiteSpace(newName))
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Provision {newName}",
+                "Description",
+                ["provision", "new-product", newName],
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is ["new-product", var productName, var productDescription])
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Provision {productName}",
+                "Product (e.g. \"Cisco 8841\")",
+                ["provision", "new-device-pool", productName, productDescription]));
+            return 0;
+        }
+        if (context.Arguments is
+            ["new-device-pool", var dpName, var dpDescription, var dpProduct] &&
+            !string.IsNullOrWhiteSpace(dpProduct))
+        {
+            await RespondWithProvisionNamedSelectorAsync(
+                context,
+                cucm,
+                "Select device pool",
+                "new-template",
+                new ProvisionWizardState(true, dpName, Normalize(dpDescription), dpProduct),
+                "device-pool",
+                allowNone: false);
+            return 0;
+        }
+        if (TryParseProvisionWizardState(context.Arguments, "new-template", out var templateState))
+        {
+            await RespondWithProvisionNamedSelectorAsync(
+                context,
+                cucm,
+                "Select phone button template",
+                "new-security-profile",
+                templateState,
+                "phone-template",
+                allowNone: true);
+            return 0;
+        }
+        if (TryParseProvisionWizardState(context.Arguments, "new-security-profile", out var securityState))
+        {
+            await RespondWithProvisionNamedSelectorAsync(
+                context,
+                cucm,
+                "Select security profile",
+                "new-user",
+                securityState,
+                "security-profile",
+                allowNone: true);
+            return 0;
+        }
+        if (TryParseProvisionWizardState(context.Arguments, "new-user", out var userSelectionState))
+        {
+            await RespondWithProvisionUserSelectorAsync(context, cucm, userSelectionState);
+            return 0;
+        }
+        if (context.Arguments is ["existing"])
+        {
+            var rows = new List<ModuleTableRow>();
+            await foreach (var phone in cucm.ListPhonesAsync(cancellationToken: context.CancellationToken))
+            {
+                if (string.IsNullOrWhiteSpace(phone.Name) || !string.IsNullOrWhiteSpace(phone.OwnerUserName))
+                {
+                    continue;
+                }
+                rows.Add(new ModuleTableRow(
+                    phone.Name,
+                    [Clean(phone.Name), Clean(phone.Description), Clean(phone.Model ?? phone.Product), Clean(phone.DevicePoolName)],
+                    ["provision", "existing-selected", phone.Name]));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Unassigned CUCM phones",
+                ["NAME", "DESCRIPTION", "MODEL", "DEVICE POOL"],
+                rows));
+            return 0;
+        }
+        if (context.Arguments is ["existing-selected", var existingPhoneName])
+        {
+            var phone = await RequirePhoneAsync(cucm, existingPhoneName, context.CancellationToken);
+            if (!string.IsNullOrWhiteSpace(phone.OwnerUserName))
+            {
+                throw new InvalidOperationException(
+                    $"CUCM phone '{existingPhoneName}' is already owned by '{phone.OwnerUserName}'.");
+            }
+            var existingState = new ProvisionWizardState(
+                false,
+                phone.Name ?? existingPhoneName,
+                phone.Description,
+                phone.Product,
+                phone.DevicePoolName,
+                phone.PhoneTemplateName,
+                phone.SecurityProfileName);
+            await RespondWithProvisionUserSelectorAsync(context, cucm, existingState);
+            return 0;
+        }
+        if (TryParseProvisionWizardState(context.Arguments, "review", out var reviewState) &&
+            !string.IsNullOrWhiteSpace(reviewState.UserId))
+        {
+            var reviewUser = await RequireUserAsync(cucm, reviewState.UserId, context.CancellationToken);
+            var reviewDid = await RequireAvailableUserDidForUserAsync(context, reviewUser);
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review phone provisioning",
+                ["PHONE", "MODE", "PRODUCT", "DEVICE POOL", "USER", "USER DN"],
+                [
+                    new ModuleTableRow(
+                        "submit",
+                        [
+                            reviewState.PhoneName,
+                            reviewState.IsNewPhone ? "Create new" : "Use existing",
+                            Clean(reviewState.Product),
+                            Clean(reviewState.DevicePoolName),
+                            reviewUser.DisplayName ?? reviewState.UserId,
+                            reviewDid.Pattern,
+                        ],
+                        [
+                            "provision", "create", reviewState.IsNewPhone.ToString(), reviewState.PhoneName,
+                            reviewState.Description ?? string.Empty, reviewState.Product ?? string.Empty,
+                            reviewState.DevicePoolName ?? string.Empty, reviewState.PhoneTemplateName ?? string.Empty,
+                            reviewState.SecurityProfileName ?? string.Empty, reviewState.UserId,
+                            reviewDid.Pattern, reviewDid.RoutePartitionName ?? string.Empty,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments.Count == 11 && context.Arguments[0] == "create" &&
+            bool.TryParse(context.Arguments[1], out var createIsNew))
+        {
+            var createState = new ProvisionWizardState(
+                createIsNew,
+                context.Arguments[2],
+                Normalize(context.Arguments[3]),
+                Normalize(context.Arguments[4]),
+                Normalize(context.Arguments[5]),
+                Normalize(context.Arguments[6]),
+                Normalize(context.Arguments[7]),
+                Normalize(context.Arguments[8]));
+            var createPattern = context.Arguments[9];
+            var createPartition = context.Arguments[10];
+            var createUserId = createState.UserId ??
+                throw new InvalidOperationException("Provisioning state is missing a user ID.");
+
+            var user = await RequireUserAsync(cucm, createUserId, context.CancellationToken);
+            var did = await RequireAvailableUserDidAsync(context, createPattern, createPartition);
+
+            string? phoneUuid = null;
+            if (createState.IsNewPhone)
+            {
+                phoneUuid = await cucm.AddPhoneAsync(
+                    new CucmPhoneCreateRequest(
+                        createState.PhoneName,
+                        createState.Product ?? string.Empty,
+                        createState.DevicePoolName ?? string.Empty,
+                        createState.Description,
+                        PhoneTemplateName: createState.PhoneTemplateName,
+                        SecurityProfileName: createState.SecurityProfileName,
+                        OwnerUserName: createUserId),
+                    context.CancellationToken);
+            }
+            else
+            {
+                await cucm.UpdatePhoneAsync(
+                    createState.PhoneName,
+                    null,
+                    null,
+                    createUserId,
+                    context.CancellationToken);
+            }
+
+            var previousDevices = user.AssociatedDevices.ToArray();
+            var addAssociation = !previousDevices.Contains(
+                createState.PhoneName,
+                StringComparer.OrdinalIgnoreCase);
+            if (addAssociation)
+            {
+                await cucm.UpdateUserAssociatedDevicesAsync(
+                    createUserId,
+                    previousDevices.Append(createState.PhoneName),
+                    context.CancellationToken);
+            }
+
+            var effectivePartition = Normalize(createPartition);
+            var existingDn = await cucm.GetDirectoryNumberAsync(
+                did.Pattern,
+                effectivePartition,
+                context.CancellationToken);
+            EnsureUserDidCanBeAssigned(did, existingDn);
+            if (existingDn is null)
+            {
+                await cucm.AddDirectoryNumberAsync(
+                    new CucmDirectoryNumberCreateRequest(
+                        did.Pattern,
+                        effectivePartition,
+                        did.Description,
+                        did.CallingSearchSpaceName,
+                        did.VoiceMailProfileName),
+                    context.CancellationToken);
+            }
+            try
+            {
+                await cucm.AssignPhoneLineDirectoryNumberToUserAsync(
+                    createState.PhoneName,
+                    1,
+                    did.Pattern,
+                    effectivePartition,
+                    createUserId,
+                    context.CancellationToken);
+            }
+            catch (Exception assignmentException)
+            {
+                if (addAssociation)
+                {
+                    try
+                    {
+                        await cucm.UpdateUserAssociatedDevicesAsync(
+                            createUserId,
+                            previousDevices,
+                            context.CancellationToken);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        throw new InvalidOperationException(
+                            $"Phone '{createState.PhoneName}' was {(createState.IsNewPhone ? "created" : "updated")} " +
+                            $"and owned by '{createUserId}', but line 1 could not be assigned, and the " +
+                            "user-device association could not be rolled back.",
+                            new AggregateException(assignmentException, rollbackException));
+                    }
+                }
+                throw new InvalidOperationException(
+                    $"Phone '{createState.PhoneName}' was {(createState.IsNewPhone ? "created" : "updated")} and " +
+                    $"owned by '{createUserId}', but line 1 could not be assigned: {assignmentException.Message} " +
+                    $"Use 'phones select {createState.PhoneName}' to finish the line assignment.",
+                    assignmentException);
+            }
+            await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
+                did.Pattern,
+                did.RoutePartitionName,
+                createState.PhoneName,
+                1,
+                createUserId,
+                effectivePartition,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Provisioned phone '{createState.PhoneName}' for user '{createUserId}' with DN " +
+                $"'{did.Pattern}'" + (string.IsNullOrWhiteSpace(phoneUuid) ? "." : $" ({phoneUuid})."));
+            return 0;
+        }
+
+        context.Error.WriteLine(
+            "Usage: vt cucm provision\n" +
+            "       vt cucm provision new\n" +
+            "       vt cucm provision existing");
+        return 2;
+    }
+    catch (Exception exception) when (IsExpected(exception))
+    {
+        context.Error.WriteLine(exception.Message);
+        return 1;
+    }
+}
+
+static async Task RespondWithProvisionNamedSelectorAsync(
+    ModuleContext context,
+    CucmService cucm,
+    string title,
+    string nextRoute,
+    ProvisionWizardState state,
+    string resourceType,
+    bool allowNone)
+{
+    var rows = new List<ModuleTableRow>();
+    if (allowNone)
+    {
+        rows.Add(new ModuleTableRow(
+            $"none:{resourceType}",
+            ["<None>", string.Empty],
+            ProvisionWizardArguments(nextRoute, state)));
+    }
+    var resources = resourceType switch
+    {
+        "device-pool" => cucm.ListDevicePoolsAsync(cancellationToken: context.CancellationToken),
+        "phone-template" => cucm.ListPhoneButtonTemplatesAsync(
+            cancellationToken: context.CancellationToken),
+        "security-profile" => cucm.ListPhoneSecurityProfilesAsync(
+            cancellationToken: context.CancellationToken),
+        _ => throw new InvalidOperationException(
+            $"Unknown CUCM phone resource type '{resourceType}'."),
+    };
+    await foreach (var resource in resources)
+    {
+        if (string.IsNullOrWhiteSpace(resource.Name))
+        {
+            continue;
+        }
+        rows.Add(new ModuleTableRow(
+            resource.Uuid ?? $"{resourceType}:{resource.Name}",
+            [Clean(resource.Name), Clean(resource.Description)],
+            ProvisionWizardArguments(nextRoute, SetProvisionWizardResource(state, resourceType, resource.Name))));
+    }
+    await context.RespondAsync(new ModuleTableResponse(
+        title,
+        ["NAME", "DESCRIPTION"],
+        rows,
+        SubmitMode: ModuleTableSubmitMode.Save));
+}
+
+static async Task RespondWithProvisionUserSelectorAsync(
+    ModuleContext context,
+    CucmService cucm,
+    ProvisionWizardState state)
+{
+    var dids = await new UserDidStore(context.DataDirectory).LoadAsync(context.CancellationToken);
+    var rows = new List<ModuleTableRow>();
+    await foreach (var user in cucm.ListUsersAsync(cancellationToken: context.CancellationToken))
+    {
+        if (string.IsNullOrWhiteSpace(user.UserId))
+        {
+            continue;
+        }
+        var extension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber);
+        var status = UserDnStatus(user.UserId, extension, dids);
+        rows.Add(new ModuleTableRow(
+            user.UserId,
+            [Clean(user.UserId), Clean(user.DisplayName), Clean(extension), status],
+            status == "Available"
+                ? ProvisionWizardArguments("review", state with { UserId = user.UserId })
+                : null));
+    }
+    await context.RespondAsync(new ModuleTableResponse(
+        $"Select a user for {state.PhoneName}",
+        ["USER ID", "DISPLAY NAME", "USER DN", "STATUS"],
+        rows));
+}
+
+static ProvisionWizardState SetProvisionWizardResource(
+    ProvisionWizardState state,
+    string resourceType,
+    string value) => resourceType switch
+{
+    "device-pool" => state with { DevicePoolName = value },
+    "phone-template" => state with { PhoneTemplateName = value },
+    "security-profile" => state with { SecurityProfileName = value },
+    _ => throw new InvalidOperationException($"Unknown CUCM phone resource type '{resourceType}'."),
+};
+
+static IReadOnlyList<string> ProvisionWizardArguments(string route, ProvisionWizardState state) =>
+    [
+        "provision",
+        route,
+        state.IsNewPhone.ToString(),
+        state.PhoneName,
+        state.Description ?? string.Empty,
+        state.Product ?? string.Empty,
+        state.DevicePoolName ?? string.Empty,
+        state.PhoneTemplateName ?? string.Empty,
+        state.SecurityProfileName ?? string.Empty,
+        state.UserId ?? string.Empty,
+    ];
+
+static bool TryParseProvisionWizardState(
+    IReadOnlyList<string> arguments,
+    string route,
+    out ProvisionWizardState state)
+{
+    state = new ProvisionWizardState(false, string.Empty);
+    if (arguments.Count != 9 || arguments[0] != route)
+    {
+        return false;
+    }
+    state = new ProvisionWizardState(
+        bool.TryParse(arguments[1], out var isNew) && isNew,
+        arguments[2],
+        Normalize(arguments[3]),
+        Normalize(arguments[4]),
+        Normalize(arguments[5]),
+        Normalize(arguments[6]),
+        Normalize(arguments[7]),
+        Normalize(arguments[8]));
+    return true;
 }
 
 static async ValueTask<int> UsersAsync(ModuleContext context)
@@ -2240,3 +2668,14 @@ sealed record PhoneWizardState(
             SecurityProfileName: SecurityProfileName,
             OwnerUserName: OwnerUserName);
 }
+
+sealed record ProvisionWizardState(
+    bool IsNewPhone,
+    string PhoneName,
+    string? Description = null,
+    string? Product = null,
+    string? DevicePoolName = null,
+    string? PhoneTemplateName = null,
+    string? SecurityProfileName = null,
+    string? UserId = null);
+
