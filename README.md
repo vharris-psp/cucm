@@ -26,7 +26,7 @@ Open `vt cucm dids` to browse, add, or replace inventory. The add and replace pr
 
 Use **Replace** to discard an unassigned inventory and seed a corrected list. Replacement is blocked when any local assignment exists and requires `Ctrl+Enter` or `Cmd+Enter` confirmation.
 
-`vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select an unowned phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The module adds the phone to the user's associated devices, sets the phone owner, assigns the DN to the selected slot, and records the assignment locally.
+`vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select a phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The review screen's **OWNER ACTION** column shows whether the phone is getting a new owner, keeping its current one, or being reassigned away from another user. Saving adds the phone to the user's associated devices, sets the phone owner (replacing the previous owner if there was one — the previous owner's device association is removed automatically, best-effort), assigns the DN to the selected slot, ensures line 3 carries a room DN (leaving one alone if it already exists, otherwise assigning the `89898989` placeholder until a real per-phone/location room-DID source exists), and records the assignment locally.
 
 The phone-first flow remains available by opening a phone and choosing **Assign user DN to slot**. Availability is tracked by the local inventory, while CUCM remains authoritative for DN objects and phone configuration.
 
@@ -44,11 +44,11 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 
 `vt cucm provision` (or **Provision a phone** from the root menu) chains phone creation/claiming and user assignment into one guided flow:
 
-1. Choose **New phone** (walks through name, description, product, device pool, phone button template, security profile) or **Existing phone** (lists unowned CUCM phones).
+1. Choose **New phone** (walks through name, description, product, device pool, phone button template, security profile) or **Existing phone** (lists all CUCM phones, including already-owned ones, with their current owner shown).
 2. Select a CUCM user with an available DN in the local inventory; users without one are listed but not selectable.
-3. Review the phone, product, device pool, user, and DN, then save.
+3. Review the phone, product, device pool, user, DN, and owner action, then save.
 
-Saving creates (or claims) the phone with the user as owner, adds the phone to the user's associated devices, creates the DN in CUCM if needed, assigns it to line 1, and records the assignment in the local inventory — reusing the same primitives as the DID and phone-assignment flows above. If line assignment fails after the phone is created/claimed, the error names the phone so it can be finished manually via `vt cucm phones select <name>`.
+Saving creates (or claims) the phone with the user as owner, adds the phone to the user's associated devices, creates the DN in CUCM if needed, assigns it to line 1, ensures line 3 carries a room DN (same placeholder behavior as the users flow above), and records the assignment in the local inventory — reusing the same primitives as the DID and phone-assignment flows above. Claiming an already-owned existing phone replaces its owner and retains its other configuration (product, device pool, template, security profile) unchanged; the previous owner's device association is removed automatically, best-effort. If line assignment fails after the phone is created/claimed, the error names the phone so it can be finished manually via `vt cucm phones select <name>`.
 
 ## Exporting phones for analysis
 

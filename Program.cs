@@ -211,29 +211,27 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
             var rows = new List<ModuleTableRow>();
             await foreach (var phone in cucm.ListPhonesAsync(cancellationToken: context.CancellationToken))
             {
-                if (string.IsNullOrWhiteSpace(phone.Name) || !string.IsNullOrWhiteSpace(phone.OwnerUserName))
+                if (string.IsNullOrWhiteSpace(phone.Name))
                 {
                     continue;
                 }
                 rows.Add(new ModuleTableRow(
                     phone.Name,
-                    [Clean(phone.Name), Clean(phone.Description), Clean(phone.Model ?? phone.Product), Clean(phone.DevicePoolName)],
+                    [
+                        Clean(phone.Name), Clean(phone.Description), Clean(phone.Model ?? phone.Product),
+                        Clean(phone.DevicePoolName), Clean(phone.OwnerUserName),
+                    ],
                     ["provision", "existing-selected", phone.Name]));
             }
             await context.RespondAsync(new ModuleTableResponse(
-                "Unassigned CUCM phones",
-                ["NAME", "DESCRIPTION", "MODEL", "DEVICE POOL"],
+                "CUCM phones",
+                ["NAME", "DESCRIPTION", "MODEL", "DEVICE POOL", "OWNER"],
                 rows));
             return 0;
         }
         if (context.Arguments is ["existing-selected", var existingPhoneName])
         {
             var phone = await RequirePhoneAsync(cucm, existingPhoneName, context.CancellationToken);
-            if (!string.IsNullOrWhiteSpace(phone.OwnerUserName))
-            {
-                throw new InvalidOperationException(
-                    $"CUCM phone '{existingPhoneName}' is already owned by '{phone.OwnerUserName}'.");
-            }
             var existingState = new ProvisionWizardState(
                 false,
                 phone.Name ?? existingPhoneName,
@@ -241,7 +239,8 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                 phone.Product,
                 phone.DevicePoolName,
                 phone.PhoneTemplateName,
-                phone.SecurityProfileName);
+                phone.SecurityProfileName,
+                PreviousOwnerUserName: Normalize(phone.OwnerUserName));
             await RespondWithProvisionUserSelectorAsync(context, cucm, existingState);
             return 0;
         }
@@ -252,7 +251,7 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
             var reviewDid = await RequireAvailableUserDidForUserAsync(context, reviewUser);
             await context.RespondAsync(new ModuleTableResponse(
                 "Review phone provisioning",
-                ["PHONE", "MODE", "PRODUCT", "DEVICE POOL", "USER", "USER DN"],
+                ["PHONE", "MODE", "PRODUCT", "DEVICE POOL", "USER", "USER DN", "OWNER ACTION"],
                 [
                     new ModuleTableRow(
                         "submit",
@@ -263,19 +262,21 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                             Clean(reviewState.DevicePoolName),
                             reviewUser.DisplayName ?? reviewState.UserId,
                             reviewDid.Pattern,
+                            OwnerActionLabel(reviewState.PreviousOwnerUserName, reviewState.UserId),
                         ],
                         [
                             "provision", "create", reviewState.IsNewPhone.ToString(), reviewState.PhoneName,
                             reviewState.Description ?? string.Empty, reviewState.Product ?? string.Empty,
                             reviewState.DevicePoolName ?? string.Empty, reviewState.PhoneTemplateName ?? string.Empty,
                             reviewState.SecurityProfileName ?? string.Empty, reviewState.UserId,
+                            reviewState.PreviousOwnerUserName ?? string.Empty,
                             reviewDid.Pattern, reviewDid.RoutePartitionName ?? string.Empty,
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
             return 0;
         }
-        if (context.Arguments.Count == 11 && context.Arguments[0] == "create" &&
+        if (context.Arguments.Count == 12 && context.Arguments[0] == "create" &&
             bool.TryParse(context.Arguments[1], out var createIsNew))
         {
             var createState = new ProvisionWizardState(
@@ -286,14 +287,18 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                 Normalize(context.Arguments[5]),
                 Normalize(context.Arguments[6]),
                 Normalize(context.Arguments[7]),
-                Normalize(context.Arguments[8]));
-            var createPattern = context.Arguments[9];
-            var createPartition = context.Arguments[10];
+                Normalize(context.Arguments[8]),
+                Normalize(context.Arguments[9]));
+            var createPattern = context.Arguments[10];
+            var createPartition = context.Arguments[11];
             var createUserId = createState.UserId ??
                 throw new InvalidOperationException("Provisioning state is missing a user ID.");
 
             var user = await RequireUserAsync(cucm, createUserId, context.CancellationToken);
             var did = await RequireAvailableUserDidAsync(context, createPattern, createPartition);
+            var previousOwnerUserId = createState.PreviousOwnerUserName;
+            var replacingOwner = previousOwnerUserId is not null &&
+                !previousOwnerUserId.Equals(createUserId, StringComparison.OrdinalIgnoreCase);
 
             string? phoneUuid = null;
             if (createState.IsNewPhone)
@@ -392,9 +397,39 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                 createUserId,
                 effectivePartition,
                 context.CancellationToken);
+            var createWarnings = new List<string>();
+            if (replacingOwner)
+            {
+                try
+                {
+                    await RemovePhoneFromPreviousOwnerAsync(
+                        cucm,
+                        previousOwnerUserId!,
+                        createState.PhoneName,
+                        context.CancellationToken);
+                }
+                catch (Exception cleanupException)
+                {
+                    createWarnings.Add(
+                        $"could not remove '{createState.PhoneName}' from previous owner " +
+                        $"'{previousOwnerUserId}' associated devices: {cleanupException.Message}");
+                }
+            }
+            try
+            {
+                await EnsureRoomLineAsync(cucm, createState.PhoneName, context.CancellationToken);
+            }
+            catch (Exception roomException)
+            {
+                createWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
+            }
             context.Output.WriteLine(
                 $"Provisioned phone '{createState.PhoneName}' for user '{createUserId}' with DN " +
-                $"'{did.Pattern}'" + (string.IsNullOrWhiteSpace(phoneUuid) ? "." : $" ({phoneUuid})."));
+                $"'{did.Pattern}'" + (string.IsNullOrWhiteSpace(phoneUuid) ? "." : $" ({phoneUuid}).") +
+                (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
+                (createWarnings.Count == 0
+                    ? string.Empty
+                    : " WARNING: " + string.Join(" ", createWarnings)));
             return 0;
         }
 
@@ -507,6 +542,7 @@ static IReadOnlyList<string> ProvisionWizardArguments(string route, ProvisionWiz
         state.PhoneTemplateName ?? string.Empty,
         state.SecurityProfileName ?? string.Empty,
         state.UserId ?? string.Empty,
+        state.PreviousOwnerUserName ?? string.Empty,
     ];
 
 static bool TryParseProvisionWizardState(
@@ -515,7 +551,7 @@ static bool TryParseProvisionWizardState(
     out ProvisionWizardState state)
 {
     state = new ProvisionWizardState(false, string.Empty);
-    if (arguments.Count != 9 || arguments[0] != route)
+    if (arguments.Count != 10 || arguments[0] != route)
     {
         return false;
     }
@@ -527,7 +563,8 @@ static bool TryParseProvisionWizardState(
         Normalize(arguments[5]),
         Normalize(arguments[6]),
         Normalize(arguments[7]),
-        Normalize(arguments[8]));
+        Normalize(arguments[8]),
+        Normalize(arguments[9]));
     return true;
 }
 
@@ -845,17 +882,19 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 {
                     continue;
                 }
-                var eligible = string.IsNullOrWhiteSpace(phone.OwnerUserName) ||
-                    phone.OwnerUserName.Equals(phoneUserId, StringComparison.OrdinalIgnoreCase);
+                var ownedByAnother = !string.IsNullOrWhiteSpace(phone.OwnerUserName) &&
+                    !phone.OwnerUserName.Equals(phoneUserId, StringComparison.OrdinalIgnoreCase);
                 rows.Add(new ModuleTableRow(
                     phoneName,
                     [
                         phoneName,
                         Clean(phone.Description),
                         Clean(phone.OwnerUserName),
-                        eligible ? $"Assign {did.Pattern}" : "Owned by another user",
+                        ownedByAnother
+                            ? $"Reassign from {phone.OwnerUserName} to {did.Pattern}"
+                            : $"Assign {did.Pattern}",
                     ],
-                    eligible ? ["users", "phone", phoneUserId, phoneName] : null));
+                    ["users", "phone", phoneUserId, phoneName]));
             }
             await context.RespondAsync(new ModuleTableResponse(
                 $"Select a phone for {user.DisplayName ?? phoneUserId} ({did.Pattern})",
@@ -867,8 +906,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
         {
             var user = await RequireUserAsync(cucm, slotUserId, context.CancellationToken);
             _ = await RequireAvailableUserDidForUserAsync(context, user);
-            var phone = await RequirePhoneAsync(cucm, slotPhoneName, context.CancellationToken);
-            EnsurePhoneCanBeAssignedToUser(phone, slotUserId);
+            _ = await RequirePhoneAsync(cucm, slotPhoneName, context.CancellationToken);
             await context.RespondAsync(new ModuleTextPromptResponse(
                 $"Assign {UserDidStore.NormalizeUserExtension(user.TelephoneNumber)} to {slotPhoneName}",
                 "Line slot index",
@@ -883,7 +921,6 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
             var user = await RequireUserAsync(cucm, reviewUserId, context.CancellationToken);
             var did = await RequireAvailableUserDidForUserAsync(context, user);
             var phone = await RequirePhoneAsync(cucm, reviewPhoneName, context.CancellationToken);
-            EnsurePhoneCanBeAssignedToUser(phone, reviewUserId);
             var existing = await cucm.GetDirectoryNumberAsync(
                 did.Pattern,
                 did.RoutePartitionName,
@@ -896,7 +933,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 StringComparer.OrdinalIgnoreCase);
             await context.RespondAsync(new ModuleTableResponse(
                 "Review user phone assignment",
-                ["USER", "USER DN", "PARTITION", "PHONE", "SLOT", "CURRENT", "ASSOCIATION", "DN ACTION"],
+                ["USER", "USER DN", "PARTITION", "PHONE", "SLOT", "CURRENT", "ASSOCIATION", "DN ACTION", "OWNER ACTION"],
                 [
                     new ModuleTableRow(
                         "assign",
@@ -909,6 +946,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                             Clean(currentLine?.Pattern),
                             alreadyAssociated ? "Keep existing" : "Add to user",
                             existing is null ? "Create in CUCM" : "Use existing CUCM DN",
+                            OwnerActionLabel(phone.OwnerUserName, reviewUserId),
                         ],
                         [
                             "users", "assign", reviewUserId, reviewPhoneName, reviewSlot.ToString(),
@@ -941,7 +979,9 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 cucm,
                 assignmentPhoneName,
                 context.CancellationToken);
-            EnsurePhoneCanBeAssignedToUser(phone, assignmentUserId);
+            var previousOwnerUserId = Normalize(phone.OwnerUserName);
+            var replacingOwner = previousOwnerUserId is not null &&
+                !previousOwnerUserId.Equals(assignmentUserId, StringComparison.OrdinalIgnoreCase);
             var effectivePartition = Normalize(assignmentUserResolvedPartition);
             var existing = await cucm.GetDirectoryNumberAsync(
                 did.Pattern,
@@ -1010,9 +1050,39 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 assignmentUserId,
                 effectivePartition,
                 context.CancellationToken);
+            var assignmentWarnings = new List<string>();
+            if (replacingOwner)
+            {
+                try
+                {
+                    await RemovePhoneFromPreviousOwnerAsync(
+                        cucm,
+                        previousOwnerUserId!,
+                        assignmentPhoneName,
+                        context.CancellationToken);
+                }
+                catch (Exception cleanupException)
+                {
+                    assignmentWarnings.Add(
+                        $"could not remove '{assignmentPhoneName}' from previous owner " +
+                        $"'{previousOwnerUserId}' associated devices: {cleanupException.Message}");
+                }
+            }
+            try
+            {
+                await EnsureRoomLineAsync(cucm, assignmentPhoneName, context.CancellationToken);
+            }
+            catch (Exception roomException)
+            {
+                assignmentWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
+            }
             context.Output.WriteLine(
                 $"Assigned phone '{assignmentPhoneName}' and DN '{did.Pattern}' " +
-                $"to CUCM user '{assignmentUserId}'.");
+                $"to CUCM user '{assignmentUserId}'." +
+                (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
+                (assignmentWarnings.Count == 0
+                    ? string.Empty
+                    : " WARNING: " + string.Join(" ", assignmentWarnings)));
             return 0;
         }
 
@@ -1095,16 +1165,78 @@ static async Task<CucmUser> RequireUserAsync(
     await cucm.GetUserAsync(userId, cancellationToken) ??
         throw new InvalidOperationException($"CUCM user '{userId}' was not found.");
 
-static void EnsurePhoneCanBeAssignedToUser(CucmPhone phone, string userId)
+// Describes what will happen to a phone's current owner when it's (re)assigned to userId,
+// for display on review screens before the user confirms with Ctrl+Enter/Cmd+Enter.
+static string OwnerActionLabel(string? currentOwner, string userId)
 {
-    if (!string.IsNullOrWhiteSpace(phone.OwnerUserName) &&
-        !phone.OwnerUserName.Equals(userId, StringComparison.OrdinalIgnoreCase))
+    if (string.IsNullOrWhiteSpace(currentOwner))
     {
-        throw new InvalidOperationException(
-            $"CUCM phone '{phone.Name}' is owned by '{phone.OwnerUserName}' and cannot be " +
-            $"assigned to '{userId}'.");
+        return "Set new owner";
+    }
+    return currentOwner.Equals(userId, StringComparison.OrdinalIgnoreCase)
+        ? "Keep current owner"
+        : $"Replace '{currentOwner}'";
+}
+
+// Removes a phone from a previous owner's associated devices after it has been reassigned to
+// a new owner in CUCM, so the old owner doesn't retain a stale device association.
+static async Task RemovePhoneFromPreviousOwnerAsync(
+    CucmService cucm,
+    string previousOwnerUserId,
+    string phoneName,
+    CancellationToken cancellationToken)
+{
+    var previousOwner = await cucm.GetUserAsync(previousOwnerUserId, cancellationToken);
+    if (previousOwner is null)
+    {
+        return;
+    }
+    var remainingDevices = previousOwner.AssociatedDevices
+        .Where(device => !device.Equals(phoneName, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    if (remainingDevices.Length != previousOwner.AssociatedDevices.Count)
+    {
+        await cucm.UpdateUserAssociatedDevicesAsync(
+            previousOwnerUserId,
+            remainingDevices,
+            cancellationToken);
     }
 }
+
+// School convention: line 1 carries the assigned user's DN, line 3 carries a shared room DN.
+// Existing line 3 assignments are left untouched. There is no per-phone/location room-DID
+// source yet, so a missing line 3 gets a placeholder room DN rather than blocking the
+// phone/user assignment on unknown room data.
+static async Task EnsureRoomLineAsync(
+    CucmService cucm,
+    string phoneName,
+    CancellationToken cancellationToken)
+{
+    var phone = await RequirePhoneAsync(cucm, phoneName, cancellationToken);
+    var lineThree = phone.Lines.FirstOrDefault(line => line.Index == 3);
+    if (!string.IsNullOrWhiteSpace(lineThree?.Pattern))
+    {
+        return;
+    }
+    var roomPattern = RoomDidPlaceholderPattern();
+    var existingRoomDn = await cucm.GetDirectoryNumberAsync(roomPattern, null, cancellationToken);
+    if (existingRoomDn is null)
+    {
+        await cucm.AddDirectoryNumberAsync(
+            new CucmDirectoryNumberCreateRequest(roomPattern),
+            cancellationToken);
+    }
+    await cucm.AssignPhoneLineDirectoryNumberAsync(
+        phoneName,
+        3,
+        roomPattern,
+        null,
+        cancellationToken);
+}
+
+// Placeholder room DN used to populate an empty line 3 until a real per-phone/location room
+// DID source exists.
+static string RoomDidPlaceholderPattern() => "89898989";
 
 static async ValueTask<int> PhonesAsync(ModuleContext context)
 {
@@ -2915,7 +3047,8 @@ sealed record ProvisionWizardState(
     string? DevicePoolName = null,
     string? PhoneTemplateName = null,
     string? SecurityProfileName = null,
-    string? UserId = null);
+    string? UserId = null,
+    string? PreviousOwnerUserName = null);
 
 sealed record PhoneExportRecord(
     string Name,
