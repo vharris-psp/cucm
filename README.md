@@ -1,5 +1,7 @@
 # CUCM VT module
 
+Run `vt cucm` with no subcommand to open the centralized home menu (users, phones, directory numbers, the local DID inventory, phone provisioning, and export) — the same menu is discoverable via `--help` and `--vt-module-describe` as this module's default command.
+
 ## User DN inventory
 
 The module keeps an approved inventory of four-digit user directory numbers in its private VT data directory:
@@ -28,7 +30,7 @@ Use **Replace** to discard an unassigned inventory and seed a corrected list. Re
 
 `vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select a phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The review screen's **OWNER ACTION** column shows whether the phone is getting a new owner, keeping its current one, or being reassigned away from another user. Saving adds the phone to the user's associated devices, sets the phone owner (replacing the previous owner if there was one — the previous owner's device association is removed automatically, best-effort), assigns the DN to the selected slot, ensures line 3 carries a room DN (leaving one alone if it already exists, otherwise assigning the `89898989` placeholder until a real per-phone/location room-DID source exists), and records the assignment locally.
 
-The phone-first flow remains available by opening a phone and choosing **Assign user DN to slot**. Availability is tracked by the local inventory, while CUCM remains authoritative for DN objects and phone configuration.
+The phone-first flow remains available by opening a phone and choosing **Assign user DN to slot**, which shows the phone's existing lines plus an **Add new line** row (next available index) and a **Custom** escape hatch for a specific index. Assigning a new line beyond what CUCM already has fails if the phone's button template has no free Line-type button position at that index — change the template first via **Edit** on the phone. Availability is tracked by the local inventory, while CUCM remains authoritative for DN objects and phone configuration.
 
 For an existing four-digit CUCM DN, the module resolves and reuses the DN's actual route partition during review. If the DN does not exist, location-specific `user-did-*` defaults must be configured before the module will create it. The module never guesses a partition for a missing DN.
 
@@ -38,7 +40,7 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 
 `vt cucm dn` lists directory numbers; selecting one opens **Info**, **Edit**, or **Delete**. Edit walks through calling search space, voicemail profile, and forward-all, then saves via review. Delete requires review confirmation. `vt cucm dn add` remains for creating a new DN directly.
 
-`vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
+`vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner, button template) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
 
 ## Room DNs and building routing
 

@@ -46,7 +46,11 @@ return await ModuleApplication
         defaultValue: "User DID")
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
-    .Default(RootAsync)
+    .Default(
+        RootAsync,
+        "Show the CUCM home menu: users, phones, directory numbers, the local DID inventory, " +
+            "phone provisioning, and data export.",
+        ModuleResponseKind.Table)
     .Command(
         "users",
         "Browse CUCM users and their phones through AXL.",
@@ -86,18 +90,23 @@ return await ModuleApplication
 
 static async ValueTask<int> RootAsync(ModuleContext context)
 {
+    var publisher = context.Configuration.GetValueOrDefault("publisher");
     await context.RespondAsync(new ModuleTableResponse(
-        "CUCM",
+        string.IsNullOrWhiteSpace(publisher) ? "CUCM" : $"CUCM — {publisher}",
         ["AREA", "DESCRIPTION"],
         [
+            new ModuleTableRow(
+                "provision",
+                ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
+                ["provision"]),
+            new ModuleTableRow(
+                "phones",
+                ["Phones", "Browse CUCM phones, lines/DNs, room DNs, checks, and edits"],
+                ["phones", "list"]),
             new ModuleTableRow(
                 "users",
                 ["Users", "Browse CUCM users and assign phones and DNs"],
                 ["users", "list"]),
-            new ModuleTableRow(
-                "phones",
-                ["Phones", "Browse CUCM phones and update line configuration"],
-                ["phones", "list"]),
             new ModuleTableRow(
                 "dn",
                 ["Directory numbers", "List, inspect, and create CUCM directory numbers"],
@@ -106,10 +115,6 @@ static async ValueTask<int> RootAsync(ModuleContext context)
                 "dids",
                 ["User DID inventory", "Manage the local approved inventory of user DNs"],
                 ["dids"]),
-            new ModuleTableRow(
-                "provision",
-                ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
-                ["provision"]),
             new ModuleTableRow(
                 "get",
                 ["Export CUCM data", "Query phones by device pool and export to console or a file"],
@@ -1333,16 +1338,60 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         }
         if (context.Arguments is ["assign-slot", var phoneNameForSlot])
         {
+            var phoneForSlotList = await RequirePhoneAsync(cucm, phoneNameForSlot, context.CancellationToken);
+            var nextSlotIndex = phoneForSlotList.Lines.Count == 0
+                ? 1
+                : phoneForSlotList.Lines.Max(line => line.Index) + 1;
+            var slotRows = phoneForSlotList.Lines
+                .OrderBy(line => line.Index)
+                .Select(line => new ModuleTableRow(
+                    $"slot-{line.Index}",
+                    [
+                        line.Index.ToString(),
+                        string.IsNullOrWhiteSpace(line.Pattern) ? "<Empty>" : Clean(line.Pattern),
+                        Clean(line.RoutePartitionName),
+                        Clean(line.Label),
+                    ],
+                    ["phones", "slot", phoneNameForSlot, line.Index.ToString()]))
+                .ToList();
+            slotRows.Add(new ModuleTableRow(
+                "slot-next",
+                [nextSlotIndex.ToString(), "<Add new line>", string.Empty, string.Empty],
+                ["phones", "slot", phoneNameForSlot, nextSlotIndex.ToString()]));
+            slotRows.Add(new ModuleTableRow(
+                "slot-custom",
+                ["Custom", "Enter a specific line index", string.Empty, string.Empty],
+                ["phones", "assign-slot-custom", phoneNameForSlot]));
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Assign user DN on {phoneForSlotList.Name ?? phoneNameForSlot}",
+                ["INDEX", "CURRENT NUMBER", "PARTITION", "LABEL"],
+                slotRows));
+            return 0;
+        }
+        if (context.Arguments is ["assign-slot-custom", var phoneNameForSlotCustom])
+        {
             await context.RespondAsync(new ModuleTextPromptResponse(
-                $"Assign user DID on {phoneNameForSlot}",
+                $"Assign user DID on {phoneNameForSlotCustom}",
                 "Line slot index",
-                ["phones", "slot", phoneNameForSlot]));
+                ["phones", "slot", phoneNameForSlotCustom]));
             return 0;
         }
         if (context.Arguments is ["slot", var phoneNameForSlotSelection, var slotIndexText] &&
             int.TryParse(slotIndexText, out var slotIndex) && slotIndex > 0)
         {
-            _ = await RequirePhoneAsync(cucm, phoneNameForSlotSelection, context.CancellationToken);
+            var phoneForSlotSelection = await RequirePhoneAsync(
+                cucm,
+                phoneNameForSlotSelection,
+                context.CancellationToken);
+            if (!phoneForSlotSelection.Lines.Any(line => line.Index == slotIndex))
+            {
+                context.Output.WriteLine(
+                    $"Note: line {slotIndex} doesn't exist yet on {phoneNameForSlotSelection}. CUCM " +
+                    "only accepts a new line at a position defined as a Line-type button in the " +
+                    $"phone's button template ('{Clean(phoneForSlotSelection.PhoneTemplateName)}'). " +
+                    "If the assignment below fails, change the phone's button template via " +
+                    "'phones edit' to one with more line positions, then retry.");
+            }
             await RespondWithAvailableUserDidsAsync(
                 context,
                 phoneNameForSlotSelection,
@@ -1571,12 +1620,26 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         did.VoiceMailProfileName),
                     context.CancellationToken);
             }
-            await cucm.AssignPhoneLineDirectoryNumberAsync(
-                phoneNameForDidAssignment,
-                assignmentIndex,
-                did.Pattern,
-                Normalize(assignmentResolvedPartition),
-                context.CancellationToken);
+            var lineExistedBeforeAssignment = phone.Lines.Any(line => line.Index == assignmentIndex);
+            try
+            {
+                await cucm.AssignPhoneLineDirectoryNumberAsync(
+                    phoneNameForDidAssignment,
+                    assignmentIndex,
+                    did.Pattern,
+                    Normalize(assignmentResolvedPartition),
+                    context.CancellationToken);
+            }
+            catch (Exception assignException) when (!lineExistedBeforeAssignment)
+            {
+                throw new InvalidOperationException(
+                    $"Could not add a new line at index {assignmentIndex} on '{phoneNameForDidAssignment}'. " +
+                    $"This phone's button template ('{Clean(phone.PhoneTemplateName)}') may not define a " +
+                    "Line-type button at that position. Change the phone's button template via " +
+                    $"'phones edit' to one with more line positions, then retry. CUCM error: " +
+                    $"{assignException.Message}",
+                    assignException);
+            }
             await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
                 did.Pattern,
                 did.RoutePartitionName,
@@ -1954,7 +2017,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 $"Edit phone {ownerEditPhoneName}",
                 "Owner user ID",
                 [
-                    "phones", "edit-review", ownerEditPhoneName,
+                    "phones", "edit-template", ownerEditPhoneName,
                     ownerEditDescriptionRaw, ownerEditDevicePoolRaw,
                 ],
                 phone.OwnerUserName,
@@ -1963,15 +2026,55 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         }
         if (context.Arguments is
             [
+                "edit-template", var templateEditPhoneName, var templateEditDescriptionRaw,
+                var templateEditDevicePoolRaw, var templateEditOwnerRaw,
+            ])
+        {
+            var rows = new List<ModuleTableRow>
+            {
+                new(
+                    "keep",
+                    ["<Keep current>", string.Empty],
+                    [
+                        "phones", "edit-review", templateEditPhoneName,
+                        templateEditDescriptionRaw, templateEditDevicePoolRaw, templateEditOwnerRaw,
+                        string.Empty,
+                    ]),
+            };
+            await foreach (var template in cucm.ListPhoneButtonTemplatesAsync(
+                cancellationToken: context.CancellationToken))
+            {
+                if (string.IsNullOrWhiteSpace(template.Name))
+                {
+                    continue;
+                }
+                rows.Add(new ModuleTableRow(
+                    template.Uuid ?? $"phone-button-template:{template.Name}",
+                    [Clean(template.Name), Clean(template.Description)],
+                    [
+                        "phones", "edit-review", templateEditPhoneName,
+                        templateEditDescriptionRaw, templateEditDevicePoolRaw, templateEditOwnerRaw,
+                        template.Name,
+                    ]));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Select phone button template",
+                ["NAME", "DESCRIPTION"],
+                rows,
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            [
                 "edit-review", var reviewPhoneName, var reviewDescriptionRaw, var reviewDevicePoolRaw,
-                var reviewOwnerRaw,
+                var reviewOwnerRaw, var reviewTemplateRaw,
             ])
         {
             // Empty values mean "leave unchanged" (UpdatePhoneAsync omits null fields), so
             // reviewing an intentional blank-out isn't distinguishable from "no change" here.
             await context.RespondAsync(new ModuleTableResponse(
                 $"Review changes to {reviewPhoneName}",
-                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER"],
+                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "BUTTON TEMPLATE"],
                 [
                     new ModuleTableRow(
                         "submit",
@@ -1986,10 +2089,13 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                             string.IsNullOrWhiteSpace(reviewOwnerRaw)
                                 ? "<Unchanged>"
                                 : Clean(reviewOwnerRaw),
+                            string.IsNullOrWhiteSpace(reviewTemplateRaw)
+                                ? "<Unchanged>"
+                                : Clean(reviewTemplateRaw),
                         ],
                         [
                             "phones", "edit-update", reviewPhoneName,
-                            reviewDescriptionRaw, reviewDevicePoolRaw, reviewOwnerRaw,
+                            reviewDescriptionRaw, reviewDevicePoolRaw, reviewOwnerRaw, reviewTemplateRaw,
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
@@ -1998,7 +2104,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         if (context.Arguments is
             [
                 "edit-update", var updatePhoneName, var updateDescriptionRaw, var updateDevicePoolRaw,
-                var updateOwnerRaw,
+                var updateOwnerRaw, var updateTemplateRaw,
             ])
         {
             await cucm.UpdatePhoneAsync(
@@ -2006,7 +2112,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 Normalize(updateDescriptionRaw),
                 Normalize(updateDevicePoolRaw),
                 Normalize(updateOwnerRaw),
-                context.CancellationToken);
+                context.CancellationToken,
+                Normalize(updateTemplateRaw));
             context.Output.WriteLine($"Updated phone '{updatePhoneName}'.");
             return 0;
         }
