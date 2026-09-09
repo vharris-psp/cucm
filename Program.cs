@@ -17,6 +17,12 @@ return await ModuleApplication
         required: false,
         defaultValue: "{}")
     .Setting(
+        "building-patterns",
+        "JSON object mapping building codes to { routePartitionName, devicePools[] } used for " +
+            "room DN creation and room-routing checks",
+        required: false,
+        defaultValue: "{}")
+    .Setting(
         "phone-check-placeholder",
         "Temporary JSON assignment with userDn, roomNumber, and location",
         required: false,
@@ -1357,6 +1363,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         "classroom",
                         ["Classroom", "Validate assigned-user and room lines"],
                         ["phones", "check", phoneNameForChecks, "classroom"]),
+                    new ModuleTableRow(
+                        "room-routing",
+                        ["Room routing", "Validate the room line's partition against its building"],
+                        ["phones", "check", phoneNameForChecks, "room-routing"]),
                 ]));
             return 0;
         }
@@ -1365,18 +1375,30 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         {
             await context.ReportProgressAsync("Loading CUCM phone", 0, 3);
             var phone = await RequirePhoneAsync(cucm, phoneNameToCheck, context.CancellationToken);
-            await context.ReportProgressAsync("Resolving phone assignment", 1, 3);
-            var assignment = PhoneConfigurationChecks.ResolvePlaceholderAssignment(
-                phone,
-                context.Configuration.GetValueOrDefault("phone-check-placeholder") ?? "{}");
-            var roomPartitions = PhoneConfigurationChecks.ParseRoomPartitions(
-                context.Configuration.GetValueOrDefault("room-partitions") ?? "{}");
-            await context.ReportProgressAsync("Evaluating classroom configuration", 2, 3);
-            var results = PhoneConfigurationChecks.Evaluate(
-                profile,
-                phone,
-                assignment,
-                roomPartitions);
+            IReadOnlyList<PhoneCheckResult> results;
+            if (profile == PhoneConfigurationProfile.RoomRouting)
+            {
+                await context.ReportProgressAsync("Resolving building patterns", 1, 3);
+                var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
+                    context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+                await context.ReportProgressAsync("Evaluating room routing", 2, 3);
+                results = PhoneConfigurationChecks.EvaluateRoomRouting(phone, buildingPatterns);
+            }
+            else
+            {
+                await context.ReportProgressAsync("Resolving phone assignment", 1, 3);
+                var assignment = PhoneConfigurationChecks.ResolvePlaceholderAssignment(
+                    phone,
+                    context.Configuration.GetValueOrDefault("phone-check-placeholder") ?? "{}");
+                var roomPartitions = PhoneConfigurationChecks.ParseRoomPartitions(
+                    context.Configuration.GetValueOrDefault("room-partitions") ?? "{}");
+                await context.ReportProgressAsync("Evaluating classroom configuration", 2, 3);
+                results = PhoneConfigurationChecks.Evaluate(
+                    profile,
+                    phone,
+                    assignment,
+                    roomPartitions);
+            }
             await context.ReportProgressAsync("Phone configuration check complete", 3, 3);
             await context.RespondAsync(new ModuleTableResponse(
                 $"{FormatProfile(profile)} check: {phone.Name ?? phoneNameToCheck}",
@@ -1437,9 +1459,22 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["Assign available user DN", "Select from the local approved inventory"],
                         ["phones", "dids", phoneNameForLine, lineIndex.ToString()]),
                     new ModuleTableRow(
+                        "assign-room-did",
+                        ["Assign room DN", "Create or reuse a room DN by building + room number"],
+                        ["phones", "room-building", phoneNameForLine, lineIndex.ToString()]),
+                    new ModuleTableRow(
                         "set-label",
                         ["Set label", Clean(line.Label)],
                         ["phones", "label", phoneNameForLine, lineIndex.ToString()]),
+                    new ModuleTableRow(
+                        "remove-dn",
+                        [
+                            "Remove directory number",
+                            string.IsNullOrWhiteSpace(line.Pattern)
+                                ? "No DN assigned"
+                                : $"Clear {line.Pattern}",
+                        ],
+                        ["phones", "remove-line-review", phoneNameForLine, lineIndex.ToString()]),
                 ]));
             return 0;
         }
@@ -1565,6 +1600,172 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             context.Output.WriteLine(
                 $"Updated line {dnUpdateIndex} on {phoneNameForDnUpdate} to directory number '{newDn}'.");
+            return 0;
+        }
+        if (context.Arguments is ["room-building", var phoneNameForRoomBuilding, var roomLineIndexText] &&
+            int.TryParse(roomLineIndexText, out var roomBuildingLineIndex) && roomBuildingLineIndex > 0)
+        {
+            _ = await RequirePhoneAsync(cucm, phoneNameForRoomBuilding, context.CancellationToken);
+            var buildingPatterns = RequireBuildingPatterns(context);
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Select a building for line {roomBuildingLineIndex} on {phoneNameForRoomBuilding}",
+                ["BUILDING", "PARTITION", "DEVICE POOLS"],
+                buildingPatterns
+                    .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(pair => new ModuleTableRow(
+                        pair.Key,
+                        [
+                            pair.Key,
+                            pair.Value.RoutePartitionName,
+                            pair.Value.DevicePoolNames.Count == 0
+                                ? "<none>"
+                                : string.Join(", ", pair.Value.DevicePoolNames),
+                        ],
+                        [
+                            "phones", "room-number", phoneNameForRoomBuilding,
+                            roomBuildingLineIndex.ToString(), pair.Key,
+                        ]))
+                    .ToArray()));
+            return 0;
+        }
+        if (context.Arguments is
+            ["room-number", var phoneNameForRoomNumber, var roomNumberLineIndexText, var roomBuildingCode] &&
+            int.TryParse(roomNumberLineIndexText, out var roomNumberLineIndex) && roomNumberLineIndex > 0)
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Room number for building {roomBuildingCode}",
+                "Room number (3 digits)",
+                [
+                    "phones", "room-review", phoneNameForRoomNumber,
+                    roomNumberLineIndex.ToString(), roomBuildingCode,
+                ]));
+            return 0;
+        }
+        if (context.Arguments is
+            ["room-review", var phoneNameForRoomReview, var roomReviewLineIndexText,
+                var roomReviewBuildingCode, var roomNumber] &&
+            int.TryParse(roomReviewLineIndexText, out var roomReviewLineIndex) && roomReviewLineIndex > 0)
+        {
+            if (!PhoneConfigurationChecks.IsRoomNumber(roomNumber))
+            {
+                throw new InvalidOperationException(
+                    $"'{roomNumber}' is not a valid three-digit room number.");
+            }
+            var phone = await RequirePhoneAsync(cucm, phoneNameForRoomReview, context.CancellationToken);
+            var line = phone.Lines.FirstOrDefault(candidate => candidate.Index == roomReviewLineIndex);
+            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPattern = RequireBuildingPattern(buildingPatterns, roomReviewBuildingCode);
+            var existing = await cucm.GetDirectoryNumberAsync(
+                roomNumber,
+                buildingPattern.RoutePartitionName,
+                context.CancellationToken);
+            EnsureRoomDidCanBeAssigned(roomNumber, buildingPattern.RoutePartitionName, existing);
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review room DN assignment",
+                ["PHONE", "SLOT", "CURRENT", "ROOM DN", "BUILDING", "PARTITION", "DN ACTION"],
+                [
+                    new ModuleTableRow(
+                        "assign",
+                        [
+                            phone.Name ?? phoneNameForRoomReview,
+                            roomReviewLineIndex.ToString(),
+                            string.IsNullOrWhiteSpace(line?.Pattern) ? "<Empty>" : Clean(line.Pattern),
+                            roomNumber,
+                            roomReviewBuildingCode,
+                            DisplayPartition(buildingPattern.RoutePartitionName),
+                            existing is null ? "Create in CUCM" : "Use existing CUCM DN",
+                        ],
+                        [
+                            "phones", "assign-room", phoneNameForRoomReview,
+                            roomReviewLineIndex.ToString(), roomReviewBuildingCode, roomNumber,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            ["assign-room", var phoneNameForRoomAssignment, var roomAssignLineIndexText,
+                var roomAssignBuildingCode, var roomAssignNumber] &&
+            int.TryParse(roomAssignLineIndexText, out var roomAssignLineIndex) && roomAssignLineIndex > 0)
+        {
+            if (!PhoneConfigurationChecks.IsRoomNumber(roomAssignNumber))
+            {
+                throw new InvalidOperationException(
+                    $"'{roomAssignNumber}' is not a valid three-digit room number.");
+            }
+            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPattern = RequireBuildingPattern(buildingPatterns, roomAssignBuildingCode);
+            var existing = await cucm.GetDirectoryNumberAsync(
+                roomAssignNumber,
+                buildingPattern.RoutePartitionName,
+                context.CancellationToken);
+            EnsureRoomDidCanBeAssigned(roomAssignNumber, buildingPattern.RoutePartitionName, existing);
+            if (existing is null)
+            {
+                await cucm.AddDirectoryNumberAsync(
+                    new CucmDirectoryNumberCreateRequest(
+                        roomAssignNumber,
+                        buildingPattern.RoutePartitionName,
+                        $"Room {roomAssignNumber} ({roomAssignBuildingCode})"),
+                    context.CancellationToken);
+            }
+            await cucm.AssignPhoneLineDirectoryNumberAsync(
+                phoneNameForRoomAssignment,
+                roomAssignLineIndex,
+                roomAssignNumber,
+                buildingPattern.RoutePartitionName,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Assigned room DN '{roomAssignNumber}' (building {roomAssignBuildingCode}) to line " +
+                $"{roomAssignLineIndex} on {phoneNameForRoomAssignment}" +
+                (existing is null ? " after creating the DN in CUCM." : "."));
+            return 0;
+        }
+        if (context.Arguments is
+            ["remove-line-review", var phoneNameForRemoveReview, var removeReviewIndexText] &&
+            int.TryParse(removeReviewIndexText, out var removeReviewIndex) && removeReviewIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm, phoneNameForRemoveReview, removeReviewIndex, context.CancellationToken);
+            if (string.IsNullOrWhiteSpace(line.Pattern))
+            {
+                throw new InvalidOperationException(
+                    $"Line {removeReviewIndex} on {phoneNameForRemoveReview} has no directory number to remove.");
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review directory number removal",
+                ["PHONE", "SLOT", "NUMBER", "PARTITION", "ACTION"],
+                [
+                    new ModuleTableRow(
+                        "remove",
+                        [
+                            phoneNameForRemoveReview,
+                            removeReviewIndex.ToString(),
+                            line.Pattern,
+                            DisplayPartition(line.RoutePartitionName),
+                            "Remove from phone",
+                        ],
+                        ["phones", "remove-line", phoneNameForRemoveReview, removeReviewIndex.ToString()]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is ["remove-line", var phoneNameForRemove, var removeIndexText] &&
+            int.TryParse(removeIndexText, out var removeIndex) && removeIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm, phoneNameForRemove, removeIndex, context.CancellationToken);
+            var removedPattern = line.Pattern;
+            await cucm.RemovePhoneLineAsync(phoneNameForRemove, removeIndex, context.CancellationToken);
+            var clearedLocalRecord = await new UserDidStore(context.DataDirectory).ClearAssignmentAsync(
+                phoneNameForRemove,
+                removeIndex,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Removed directory number '{removedPattern}' from line {removeIndex} on {phoneNameForRemove}." +
+                (clearedLocalRecord
+                    ? " Cleared the matching local user DN inventory assignment."
+                    : string.Empty));
             return 0;
         }
         if (context.Arguments is ["label", var phoneNameForPrompt, var labelIndexText] &&
@@ -1813,7 +2014,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         context.Error.WriteLine(
             "Usage: vt cucm phones list [--max <count>] [--page-size <count>]\n" +
             "       vt cucm phones add\n" +
-            "       vt cucm phones check <phone> [basic-room|classroom]");
+            "       vt cucm phones check <phone> [basic-room|classroom|room-routing]");
         return 2;
     }
     catch (Exception exception) when (IsExpected(exception))
@@ -2001,6 +2202,44 @@ static void EnsureUserDidCanBeAssigned(UserDid did, CucmDirectoryNumber? existin
         throw new InvalidOperationException(
             $"User DN '{did.Pattern}' does not exist in CUCM and has no route partition. " +
             "Configure its location-specific defaults before creating it.");
+    }
+}
+
+static IReadOnlyDictionary<string, BuildingPattern> RequireBuildingPatterns(ModuleContext context)
+{
+    var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
+        context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+    if (buildingPatterns.Count == 0)
+    {
+        throw new InvalidOperationException(
+            "CUCM setting 'building-patterns' has no buildings configured. Define at least one " +
+            "building with a 'routePartitionName' before creating room DNs.");
+    }
+    return buildingPatterns;
+}
+
+static BuildingPattern RequireBuildingPattern(
+    IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+    string buildingCode) =>
+    buildingPatterns.TryGetValue(buildingCode, out var pattern)
+        ? pattern
+        : throw new InvalidOperationException(
+            $"Building '{buildingCode}' is not present in the 'building-patterns' setting.");
+
+static void EnsureRoomDidCanBeAssigned(
+    string roomNumber,
+    string expectedRoutePartitionName,
+    CucmDirectoryNumber? existing)
+{
+    if (existing is not null &&
+        !string.Equals(
+            existing.RoutePartitionName,
+            expectedRoutePartitionName,
+            StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException(
+            $"Room DN '{roomNumber}' already exists in partition '{DisplayPartition(existing.RoutePartitionName)}', " +
+            $"not the expected '{expectedRoutePartitionName}'. Resolve the conflict in CUCM before assigning it.");
     }
 }
 
@@ -2887,6 +3126,7 @@ static string FormatProfile(PhoneConfigurationProfile profile) => profile switch
 {
     PhoneConfigurationProfile.BasicRoom => "Basic room",
     PhoneConfigurationProfile.Classroom => "Classroom",
+    PhoneConfigurationProfile.RoomRouting => "Room routing",
     _ => profile.ToString(),
 };
 

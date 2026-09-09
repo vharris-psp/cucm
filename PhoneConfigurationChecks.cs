@@ -5,6 +5,7 @@ internal enum PhoneConfigurationProfile
 {
     BasicRoom,
     Classroom,
+    RoomRouting,
 }
 
 internal enum PhoneCheckStatus
@@ -27,6 +28,10 @@ internal sealed record PhoneCheckResult(
     string Actual,
     PhoneCheckStatus Status,
     string Detail);
+
+internal sealed record BuildingPattern(
+    string RoutePartitionName,
+    IReadOnlyList<string> DevicePoolNames);
 
 internal static class PhoneConfigurationChecks
 {
@@ -101,6 +106,163 @@ internal static class PhoneConfigurationChecks
                 "CUCM setting 'room-partitions' contains invalid JSON.",
                 exception);
         }
+    }
+
+    internal static IReadOnlyDictionary<string, BuildingPattern> ParseBuildingPatterns(
+        string configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration))
+        {
+            return new Dictionary<string, BuildingPattern>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(configuration);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "CUCM setting 'building-patterns' must be a JSON object.");
+            }
+
+            var patterns = new Dictionary<string, BuildingPattern>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (string.IsNullOrWhiteSpace(property.Name) ||
+                    property.Value.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(
+                        "CUCM setting 'building-patterns' must map building codes to objects with " +
+                        "'routePartitionName' and 'devicePools'.");
+                }
+                var routePartitionName = ReadString(property.Value, "routePartitionName");
+                if (string.IsNullOrWhiteSpace(routePartitionName))
+                {
+                    throw new InvalidOperationException(
+                        $"Building '{property.Name}' in 'building-patterns' is missing a non-empty " +
+                        "'routePartitionName'.");
+                }
+                var devicePools = new List<string>();
+                if (property.Value.TryGetProperty("devicePools", out var devicePoolsNode))
+                {
+                    if (devicePoolsNode.ValueKind != JsonValueKind.Array)
+                    {
+                        throw new InvalidOperationException(
+                            $"Building '{property.Name}' in 'building-patterns' has a 'devicePools' " +
+                            "value that is not an array.");
+                    }
+                    foreach (var devicePool in devicePoolsNode.EnumerateArray())
+                    {
+                        if (devicePool.ValueKind != JsonValueKind.String ||
+                            string.IsNullOrWhiteSpace(devicePool.GetString()))
+                        {
+                            throw new InvalidOperationException(
+                                $"Building '{property.Name}' in 'building-patterns' has a non-string " +
+                                "or empty entry in 'devicePools'.");
+                        }
+                        devicePools.Add(devicePool.GetString()!.Trim());
+                    }
+                }
+                patterns[property.Name.Trim()] = new BuildingPattern(
+                    routePartitionName!,
+                    devicePools);
+            }
+            return patterns;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException(
+                "CUCM setting 'building-patterns' contains invalid JSON.",
+                exception);
+        }
+    }
+
+    internal static IReadOnlyList<string> FindBuildingCodesForDevicePool(
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+        string? devicePoolName)
+    {
+        ArgumentNullException.ThrowIfNull(buildingPatterns);
+        if (string.IsNullOrWhiteSpace(devicePoolName))
+        {
+            return [];
+        }
+        return buildingPatterns
+            .Where(pair => pair.Value.DevicePoolNames.Any(pool =>
+                pool.Equals(devicePoolName, StringComparison.OrdinalIgnoreCase)))
+            .Select(pair => pair.Key)
+            .ToArray();
+    }
+
+    internal static bool IsRoomNumber(string? value) =>
+        value is { Length: 3 } && value.All(char.IsAsciiDigit);
+
+    internal static IReadOnlyList<PhoneCheckResult> EvaluateRoomRouting(
+        CucmPhone phone,
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+        int roomLineIndex = 3)
+    {
+        ArgumentNullException.ThrowIfNull(phone);
+        ArgumentNullException.ThrowIfNull(buildingPatterns);
+
+        var results = new List<PhoneCheckResult>();
+        var matches = FindBuildingCodesForDevicePool(buildingPatterns, phone.DevicePoolName);
+        if (matches.Count == 0)
+        {
+            results.Add(new PhoneCheckResult(
+                "Building (from device pool)",
+                "Exactly one configured building",
+                Display(phone.DevicePoolName),
+                PhoneCheckStatus.Unresolved,
+                $"No 'building-patterns' entry lists device pool '{Display(phone.DevicePoolName)}'."));
+            return results;
+        }
+        if (matches.Count > 1)
+        {
+            results.Add(new PhoneCheckResult(
+                "Building (from device pool)",
+                "Exactly one configured building",
+                Display(phone.DevicePoolName),
+                PhoneCheckStatus.Failed,
+                $"Device pool '{phone.DevicePoolName}' is listed under multiple buildings: " +
+                $"{string.Join(", ", matches)}."));
+            return results;
+        }
+
+        var buildingCode = matches[0];
+        var buildingPattern = buildingPatterns[buildingCode];
+        results.Add(new PhoneCheckResult(
+            "Building (from device pool)",
+            buildingCode,
+            buildingCode,
+            PhoneCheckStatus.Passed,
+            $"Resolved from device pool '{phone.DevicePoolName}'."));
+
+        var roomLine = phone.Lines.FirstOrDefault(line => line.Index == roomLineIndex);
+        if (roomLine is null || string.IsNullOrWhiteSpace(roomLine.Pattern))
+        {
+            results.Add(new PhoneCheckResult(
+                $"Line {roomLineIndex} room DN",
+                "A room directory number",
+                "<missing>",
+                PhoneCheckStatus.Failed,
+                $"Line {roomLineIndex} has no directory number."));
+            return results;
+        }
+
+        results.Add(new PhoneCheckResult(
+            $"Line {roomLineIndex} room number format",
+            "3-digit room number",
+            roomLine.Pattern,
+            IsRoomNumber(roomLine.Pattern) ? PhoneCheckStatus.Passed : PhoneCheckStatus.Failed,
+            "Room extensions are expected to be exactly 3 digits."));
+
+        results.Add(EqualsCheck(
+            $"Line {roomLineIndex} room partition",
+            buildingPattern.RoutePartitionName,
+            roomLine.RoutePartitionName,
+            $"Building {buildingCode} expects partition '{buildingPattern.RoutePartitionName}'."));
+
+        return results;
     }
 
     internal static IReadOnlyList<PhoneCheckResult> Evaluate(
@@ -211,10 +373,12 @@ internal static class PhoneConfigurationChecks
         {
             "basic-room" => PhoneConfigurationProfile.BasicRoom,
             "classroom" => PhoneConfigurationProfile.Classroom,
+            "room-routing" => PhoneConfigurationProfile.RoomRouting,
             _ => default,
         };
         return value.Equals("basic-room", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("classroom", StringComparison.OrdinalIgnoreCase);
+            value.Equals("classroom", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("room-routing", StringComparison.OrdinalIgnoreCase);
     }
 
     internal static string DisplayStatus(PhoneCheckStatus status) => status switch

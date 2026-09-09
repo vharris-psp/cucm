@@ -40,6 +40,25 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 
 `vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
 
+## Room DNs and building routing
+
+Configure `building-patterns` with `vt module configure cucm` — a JSON object mapping building codes to the route partition and device pools used for local room routing:
+
+```json
+{
+  "PHS": { "routePartitionName": "PHS-Rooms", "devicePools": ["PHS-DP-Classrooms", "PHS-DP-Office"] },
+  "MS":  { "routePartitionName": "MS-Rooms",  "devicePools": ["MS-DP-Classrooms"] }
+}
+```
+
+Each building's `devicePools` list should be disjoint — a device pool listed under two buildings is flagged as a configuration error by the room-routing check below, since it makes the building unresolvable from the phone alone.
+
+From a phone's line menu (`vt cucm phones` → select a phone → **Numbers** → select a line), choose **Assign room DN** to select a building, enter a 3-digit room number, then review and save. The module creates the DN in the building's partition if it doesn't already exist (rejecting a room number that already exists in a *different* partition) and assigns it to the line — no local inventory entry is created, since room DNs are provisioned on demand rather than drawn from the approved user-DN pool.
+
+The same line menu offers **Remove directory number**, which reviews the line's current pattern/partition, then on save removes the line's DN assignment from the phone in CUCM and clears any matching local user-DN inventory assignment so that DN becomes available again.
+
+Run `vt cucm phones check <phone> room-routing` to audit a phone: it resolves the phone's building from its device pool (via `building-patterns`), flags an unresolved or ambiguous device pool, and checks that line 3 has a 3-digit number in the building's expected partition. This complements the existing `classroom` profile, which validates line 1/line 3 against the temporary `phone-check-placeholder` assignment source.
+
 ## Provisioning a phone from scratch
 
 `vt cucm provision` (or **Provision a phone** from the root menu) chains phone creation/claiming and user assignment into one guided flow:
