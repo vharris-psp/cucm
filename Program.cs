@@ -23,6 +23,13 @@ return await ModuleApplication
         required: false,
         defaultValue: "{}")
     .Setting(
+        "template-compliance-policies",
+        "JSON object mapping phone button template names to { slots: [{ index, kind: \"user\"|" +
+            "\"room\" }] }, used to auto-compose each phone's Description as a compliance summary. " +
+            "Templates with no entry here are always treated as unevaluable ('?').",
+        required: false,
+        defaultValue: "{}")
+    .Setting(
         "phone-check-placeholder",
         "Temporary JSON assignment with userDn, roomNumber, and location",
         required: false,
@@ -246,7 +253,7 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
             var existingState = new ProvisionWizardState(
                 false,
                 phone.Name ?? existingPhoneName,
-                phone.Description,
+                PhoneConfigurationChecks.ExtractRawDescription(phone.Description),
                 phone.Product,
                 phone.DevicePoolName,
                 phone.PhoneTemplateName,
@@ -434,10 +441,13 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
             {
                 createWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
             }
+            var composedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, createState.PhoneName, createState.Description, context.CancellationToken);
             context.Output.WriteLine(
                 $"Provisioned phone '{createState.PhoneName}' for user '{createUserId}' with DN " +
                 $"'{did.Pattern}'" + (string.IsNullOrWhiteSpace(phoneUuid) ? "." : $" ({phoneUuid}).") +
                 (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
+                $" Description: '{composedDescription}'." +
                 (createWarnings.Count == 0
                     ? string.Empty
                     : " WARNING: " + string.Join(" ", createWarnings)));
@@ -1087,10 +1097,13 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
             {
                 assignmentWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
             }
+            var assignmentComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, assignmentPhoneName, null, context.CancellationToken);
             context.Output.WriteLine(
                 $"Assigned phone '{assignmentPhoneName}' and DN '{did.Pattern}' " +
                 $"to CUCM user '{assignmentUserId}'." +
                 (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
+                $" Description: '{assignmentComposedDescription}'." +
                 (assignmentWarnings.Count == 0
                     ? string.Empty
                     : " WARNING: " + string.Join(" ", assignmentWarnings)));
@@ -1480,7 +1493,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     Clean(line.Label),
                     Clean(line.Display),
                 ],
-                ["phones", "line", phoneNameForLines, line.Index.ToString()])).ToArray();
+                ["phones", "line", phoneNameForLines, line.Index.ToString()])).ToList();
+            var nextLineIndex = phone.Lines.Count == 0 ? 1 : phone.Lines.Max(line => line.Index) + 1;
+            rows.Add(new ModuleTableRow(
+                $"{phoneNameForLines}:add",
+                [nextLineIndex.ToString(), "<Add new line>", string.Empty, string.Empty, string.Empty],
+                ["phones", "line", phoneNameForLines, nextLineIndex.ToString()]));
             await context.RespondAsync(new ModuleTableResponse(
                 $"Numbers on {phone.Name ?? phoneNameForLines}",
                 ["INDEX", "NUMBER", "PARTITION", "LABEL", "DISPLAY"],
@@ -1490,56 +1508,73 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         if (context.Arguments is ["line", var phoneNameForLine, var indexText] &&
             int.TryParse(indexText, out var lineIndex) && lineIndex > 0)
         {
-            var line = await RequireLineAsync(
-                cucm,
-                phoneNameForLine,
-                lineIndex,
-                context.CancellationToken);
+            var linePhone = await RequirePhoneAsync(cucm, phoneNameForLine, context.CancellationToken);
+            var line = linePhone.Lines.FirstOrDefault(candidate => candidate.Index == lineIndex);
+            var lineRows = new List<ModuleTableRow>
+            {
+                new(
+                    "set-dn",
+                    ["Set directory number", Clean(line?.Pattern)],
+                    ["phones", "dn", phoneNameForLine, lineIndex.ToString()]),
+                new(
+                    "assign-user-did",
+                    ["Assign available user DN", "Select from the local approved inventory"],
+                    ["phones", "dids", phoneNameForLine, lineIndex.ToString()]),
+                new(
+                    "assign-room-did",
+                    ["Assign room DN", "Create or reuse a room DN by building + room number"],
+                    ["phones", "room-building", phoneNameForLine, lineIndex.ToString()]),
+            };
+            // Label/caller ID/removal require an existing line appearance with a DN in CUCM; a
+            // brand-new (not-yet-assigned) index has nothing there yet to update or remove.
+            if (line is not null && !string.IsNullOrWhiteSpace(line.Pattern))
+            {
+                lineRows.Add(new ModuleTableRow(
+                    "set-label",
+                    ["Set label", Clean(line.Label)],
+                    ["phones", "label", phoneNameForLine, lineIndex.ToString()]));
+                lineRows.Add(new ModuleTableRow(
+                    "set-caller-id",
+                    ["Set caller ID", Clean(line.Display)],
+                    ["phones", "caller-id", phoneNameForLine, lineIndex.ToString()]));
+                lineRows.Add(new ModuleTableRow(
+                    "remove-dn",
+                    ["Remove directory number", $"Clear {line.Pattern}"],
+                    ["phones", "remove-line-review", phoneNameForLine, lineIndex.ToString()]));
+            }
             await context.RespondAsync(new ModuleTableResponse(
-                $"{line.Pattern ?? "Number"} on {phoneNameForLine}",
+                $"{line?.Pattern ?? $"Line {lineIndex} (new)"} on {phoneNameForLine}",
                 ["ACTION", "CURRENT VALUE"],
-                [
-                    new ModuleTableRow(
-                        "set-dn",
-                        ["Set directory number", Clean(line.Pattern)],
-                        ["phones", "dn", phoneNameForLine, lineIndex.ToString()]),
-                    new ModuleTableRow(
-                        "assign-user-did",
-                        ["Assign available user DN", "Select from the local approved inventory"],
-                        ["phones", "dids", phoneNameForLine, lineIndex.ToString()]),
-                    new ModuleTableRow(
-                        "assign-room-did",
-                        ["Assign room DN", "Create or reuse a room DN by building + room number"],
-                        ["phones", "room-building", phoneNameForLine, lineIndex.ToString()]),
-                    new ModuleTableRow(
-                        "set-label",
-                        ["Set label", Clean(line.Label)],
-                        ["phones", "label", phoneNameForLine, lineIndex.ToString()]),
-                    new ModuleTableRow(
-                        "remove-dn",
-                        [
-                            "Remove directory number",
-                            string.IsNullOrWhiteSpace(line.Pattern)
-                                ? "No DN assigned"
-                                : $"Clear {line.Pattern}",
-                        ],
-                        ["phones", "remove-line-review", phoneNameForLine, lineIndex.ToString()]),
-                ]));
+                lineRows));
             return 0;
         }
         if (context.Arguments is ["dn", var phoneNameForDnPrompt, var dnIndexText] &&
             int.TryParse(dnIndexText, out var dnIndex) && dnIndex > 0)
         {
-            var line = await RequireLineAsync(
-                cucm,
-                phoneNameForDnPrompt,
-                dnIndex,
-                context.CancellationToken);
+            var dnPhone = await RequirePhoneAsync(cucm, phoneNameForDnPrompt, context.CancellationToken);
+            var line = dnPhone.Lines.FirstOrDefault(candidate => candidate.Index == dnIndex);
             await context.RespondAsync(new ModuleTextPromptResponse(
                 $"Set directory number for line {dnIndex} on {phoneNameForDnPrompt}",
                 "Directory number",
-                ["phones", "set-dn", phoneNameForDnPrompt, dnIndex.ToString()],
-                line.Pattern));
+                ["phones", "set-dn-partition", phoneNameForDnPrompt, dnIndex.ToString()],
+                line?.Pattern));
+            return 0;
+        }
+        if (context.Arguments is
+            ["set-dn-partition", var dnPartitionPhoneName, var dnPartitionIndexText, var dnPartitionPattern] &&
+            int.TryParse(dnPartitionIndexText, out var dnPartitionIndex) && dnPartitionIndex > 0 &&
+            !string.IsNullOrWhiteSpace(dnPartitionPattern))
+        {
+            var dnPartitionPhone = await RequirePhoneAsync(
+                cucm, dnPartitionPhoneName, context.CancellationToken);
+            var dnPartitionLine = dnPartitionPhone.Lines.FirstOrDefault(
+                candidate => candidate.Index == dnPartitionIndex);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Route partition for {dnPartitionPattern} on line {dnPartitionIndex}",
+                "Route partition (leave blank for none)",
+                ["phones", "set-dn", dnPartitionPhoneName, dnPartitionIndex.ToString(), dnPartitionPattern],
+                dnPartitionLine?.RoutePartitionName,
+                AllowEmpty: true));
             return 0;
         }
         if (context.Arguments is ["dids", var phoneNameForDids, var didIndexText] &&
@@ -1648,21 +1683,46 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phone.OwnerUserName,
                 Normalize(assignmentResolvedPartition),
                 context.CancellationToken);
+            var didComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, phoneNameForDidAssignment, null, context.CancellationToken);
             context.Output.WriteLine(
                 $"Assigned user DN '{did.Pattern}' to line {assignmentIndex} on {phoneNameForDidAssignment}" +
-                (existing is null ? " after creating the DN in CUCM." : "."));
+                (existing is null ? " after creating the DN in CUCM." : ".") +
+                $" Description: '{didComposedDescription}'.");
             return 0;
         }
-        if (context.Arguments is ["set-dn", var phoneNameForDnUpdate, var dnUpdateIndexText, var newDn] &&
+        if (context.Arguments is
+            ["set-dn", var phoneNameForDnUpdate, var dnUpdateIndexText, var newDn, var newDnPartitionRaw] &&
             int.TryParse(dnUpdateIndexText, out var dnUpdateIndex) && dnUpdateIndex > 0)
         {
-            await cucm.UpdatePhoneLineDirectoryNumberAsync(
-                phoneNameForDnUpdate,
-                dnUpdateIndex,
-                newDn,
-                context.CancellationToken);
+            var dnUpdatePhone = await RequirePhoneAsync(
+                cucm, phoneNameForDnUpdate, context.CancellationToken);
+            var lineExistedBeforeDnUpdate = dnUpdatePhone.Lines.Any(line => line.Index == dnUpdateIndex);
+            var newDnPartition = Normalize(newDnPartitionRaw);
+            try
+            {
+                await cucm.AssignPhoneLineDirectoryNumberAsync(
+                    phoneNameForDnUpdate,
+                    dnUpdateIndex,
+                    newDn,
+                    newDnPartition,
+                    context.CancellationToken);
+            }
+            catch (Exception assignException) when (!lineExistedBeforeDnUpdate)
+            {
+                throw new InvalidOperationException(
+                    $"Could not add a new line at index {dnUpdateIndex} on '{phoneNameForDnUpdate}'. " +
+                    $"This phone's button template ('{Clean(dnUpdatePhone.PhoneTemplateName)}') may not " +
+                    "define a Line-type button at that position. Change the phone's button template via " +
+                    $"'phones edit' to one with more line positions, then retry. CUCM error: " +
+                    $"{assignException.Message}",
+                    assignException);
+            }
+            var dnUpdateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, phoneNameForDnUpdate, null, context.CancellationToken);
             context.Output.WriteLine(
-                $"Updated line {dnUpdateIndex} on {phoneNameForDnUpdate} to directory number '{newDn}'.");
+                $"Updated line {dnUpdateIndex} on {phoneNameForDnUpdate} to directory number '{newDn}'. " +
+                $"Description: '{dnUpdateComposedDescription}'.");
             return 0;
         }
         if (context.Arguments is ["room-building", var phoneNameForRoomBuilding, var roomLineIndexText] &&
@@ -1778,10 +1838,13 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 roomAssignNumber,
                 buildingPattern.RoutePartitionName,
                 context.CancellationToken);
+            var roomAssignComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, phoneNameForRoomAssignment, null, context.CancellationToken);
             context.Output.WriteLine(
                 $"Assigned room DN '{roomAssignNumber}' (building {roomAssignBuildingCode}) to line " +
                 $"{roomAssignLineIndex} on {phoneNameForRoomAssignment}" +
-                (existing is null ? " after creating the DN in CUCM." : "."));
+                (existing is null ? " after creating the DN in CUCM." : ".") +
+                $" Description: '{roomAssignComposedDescription}'.");
             return 0;
         }
         if (context.Arguments is
@@ -1824,11 +1887,14 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phoneNameForRemove,
                 removeIndex,
                 context.CancellationToken);
+            var removeComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, phoneNameForRemove, null, context.CancellationToken);
             context.Output.WriteLine(
                 $"Removed directory number '{removedPattern}' from line {removeIndex} on {phoneNameForRemove}." +
                 (clearedLocalRecord
                     ? " Cleared the matching local user DN inventory assignment."
-                    : string.Empty));
+                    : string.Empty) +
+                $" Description: '{removeComposedDescription}'.");
             return 0;
         }
         if (context.Arguments is ["label", var phoneNameForPrompt, var labelIndexText] &&
@@ -1857,6 +1923,37 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             context.Output.WriteLine(
                 $"Updated line {updateIndex} on {phoneNameToUpdate} with label '{newLabel}'.");
+            return 0;
+        }
+        if (context.Arguments is ["caller-id", var phoneNameForCallerIdPrompt, var callerIdIndexText] &&
+            int.TryParse(callerIdIndexText, out var callerIdIndex) && callerIdIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm,
+                phoneNameForCallerIdPrompt,
+                callerIdIndex,
+                context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Set caller ID for {line.Pattern ?? $"line {callerIdIndex}"}",
+                "Caller ID (displayed on outbound calls)",
+                ["phones", "set-caller-id", phoneNameForCallerIdPrompt, callerIdIndex.ToString()],
+                line.Display,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            ["set-caller-id", var phoneNameForCallerIdUpdate, var callerIdUpdateIndexText, var newCallerId] &&
+            int.TryParse(callerIdUpdateIndexText, out var callerIdUpdateIndex) && callerIdUpdateIndex > 0)
+        {
+            await cucm.UpdatePhoneLineDisplayAsync(
+                phoneNameForCallerIdUpdate,
+                callerIdUpdateIndex,
+                newCallerId,
+                newCallerId,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated line {callerIdUpdateIndex} on {phoneNameForCallerIdUpdate} with caller ID " +
+                $"'{newCallerId}'.");
             return 0;
         }
         if (context.Arguments is ["add"])
@@ -1954,9 +2051,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             var uuid = await cucm.AddPhoneAsync(
                 createState.ToCreateRequest(),
                 context.CancellationToken);
+            var addComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, createState.Name, createState.Description, context.CancellationToken);
             context.Output.WriteLine(
                 $"Created phone '{createState.Name}'" +
-                (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid})."));
+                (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid}).") +
+                $" Description: '{addComposedDescription}'.");
             return 0;
         }
         if (context.Arguments is ["edit", var editPhoneName])
@@ -1964,9 +2064,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             var phone = await RequirePhoneAsync(cucm, editPhoneName, context.CancellationToken);
             await context.RespondAsync(new ModuleTextPromptResponse(
                 $"Edit phone {editPhoneName}",
-                "Description",
+                "Description (fallback name/text; used verbatim when compliance can't be evaluated, " +
+                    "or in place of the owner's name when no owner is assigned)",
                 ["phones", "edit-device-pool", editPhoneName],
-                phone.Description,
+                PhoneConfigurationChecks.ExtractRawDescription(phone.Description),
                 AllowEmpty: true));
             return 0;
         }
@@ -2107,14 +2208,20 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 var updateOwnerRaw, var updateTemplateRaw,
             ])
         {
+            // Description is intentionally omitted here: it's recomposed and saved below by
+            // ComposeAndApplyPhoneDescriptionAsync, after the device pool/owner/template changes
+            // above have already landed in CUCM (so compliance evaluates against the new values).
             await cucm.UpdatePhoneAsync(
                 updatePhoneName,
-                Normalize(updateDescriptionRaw),
+                null,
                 Normalize(updateDevicePoolRaw),
                 Normalize(updateOwnerRaw),
                 context.CancellationToken,
                 Normalize(updateTemplateRaw));
-            context.Output.WriteLine($"Updated phone '{updatePhoneName}'.");
+            var updateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, updatePhoneName, Normalize(updateDescriptionRaw), context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'.");
             return 0;
         }
 
@@ -2323,6 +2430,50 @@ static IReadOnlyDictionary<string, BuildingPattern> RequireBuildingPatterns(Modu
             "building with a 'routePartitionName' before creating room DNs.");
     }
     return buildingPatterns;
+}
+
+// Recomputes and (if changed) saves a phone's CUCM Description as a compliance summary, derived from
+// its assigned phone button template's compliance policy (see 'template-compliance-policies'):
+//   Compliant/non-compliant: "{check|cross} | {RoomNumber} | {owner display name or fallback text}"
+//   Cannot be evaluated:     "? | {fallback text}"
+// manualDescriptionRaw, when provided, is an explicit override for the fallback text (e.g. freshly
+// typed into an edit/provision "Description" prompt) rather than re-extracting it from the phone's
+// current CUCM description. Call this after any change that could affect the formula's inputs
+// (owner, device pool, phone button template, or a line matching a policy slot).
+static async Task<string> ComposeAndApplyPhoneDescriptionAsync(
+    ModuleContext context,
+    CucmService cucm,
+    string phoneName,
+    string? manualDescriptionRaw,
+    CancellationToken cancellationToken)
+{
+    var phone = await RequirePhoneAsync(cucm, phoneName, cancellationToken);
+    var rawText = manualDescriptionRaw ?? PhoneConfigurationChecks.ExtractRawDescription(phone.Description);
+    var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
+        context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+    var policies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
+        context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");
+    var compliance = PhoneConfigurationChecks.EvaluateTemplateCompliance(phone, policies, buildingPatterns);
+
+    var userOrDescription = rawText;
+    if (!string.IsNullOrWhiteSpace(phone.OwnerUserName))
+    {
+        var owner = await cucm.GetUserAsync(phone.OwnerUserName, cancellationToken);
+        var ownerName = Normalize(owner?.DisplayName) ??
+            Normalize(string.Join(" ", new[] { owner?.FirstName, owner?.LastName }
+                .Where(part => !string.IsNullOrWhiteSpace(part))));
+        if (ownerName is not null)
+        {
+            userOrDescription = ownerName;
+        }
+    }
+
+    var composed = PhoneConfigurationChecks.ComposeDescription(compliance, rawText, userOrDescription);
+    if (!string.Equals(composed, phone.Description, StringComparison.Ordinal))
+    {
+        await cucm.UpdatePhoneAsync(phoneName, composed, null, null, cancellationToken);
+    }
+    return composed;
 }
 
 static BuildingPattern RequireBuildingPattern(

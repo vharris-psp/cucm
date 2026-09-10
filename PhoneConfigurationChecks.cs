@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using VSharp.Cucm.Models;
 
 internal enum PhoneConfigurationProfile
@@ -33,8 +34,43 @@ internal sealed record BuildingPattern(
     string RoutePartitionName,
     IReadOnlyList<string> DevicePoolNames);
 
+internal enum TemplateComplianceSlotKind
+{
+    User,
+    Room,
+}
+
+internal sealed record TemplateComplianceSlot(int Index, TemplateComplianceSlotKind Kind);
+
+internal sealed record TemplateCompliancePolicy(IReadOnlyList<TemplateComplianceSlot> Slots);
+
+internal enum TemplateComplianceStatus
+{
+    /// <summary>No template is assigned, no policy is configured for the assigned template, or the
+    /// phone's device pool/lines don't contain enough information to evaluate the policy.</summary>
+    Unknown,
+    Compliant,
+    NonCompliant,
+}
+
+internal sealed record TemplateComplianceResult(
+    TemplateComplianceStatus Status,
+    string? RoomNumber,
+    string Detail);
+
 internal static class PhoneConfigurationChecks
 {
+    internal const string CompliantIndicator = "\u2714";
+    internal const string NonCompliantIndicator = "\u2718";
+    internal const string UnknownIndicator = "?";
+
+    private static readonly Regex ComposedDescriptionPattern = new(
+        $@"^(?:{Regex.Escape(CompliantIndicator)}|{Regex.Escape(NonCompliantIndicator)})\s*\|\s*[^|]*\|\s*(?<raw>.*)$",
+        RegexOptions.Singleline);
+
+    private static readonly Regex UnknownDescriptionPattern = new(
+        @"^\?\s*\|\s*(?<raw>.*)$",
+        RegexOptions.Singleline);
     internal static PhoneAssignment ResolvePlaceholderAssignment(
         CucmPhone phone,
         string configuration)
@@ -176,6 +212,210 @@ internal static class PhoneConfigurationChecks
                 exception);
         }
     }
+
+    internal static IReadOnlyDictionary<string, TemplateCompliancePolicy> ParseTemplateCompliancePolicies(
+        string configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration))
+        {
+            return new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(configuration);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "CUCM setting 'template-compliance-policies' must be a JSON object.");
+            }
+
+            var policies = new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (string.IsNullOrWhiteSpace(property.Name) ||
+                    property.Value.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(
+                        "CUCM setting 'template-compliance-policies' must map phone button template names " +
+                        "to objects with a 'slots' array.");
+                }
+                if (!property.Value.TryGetProperty("slots", out var slotsNode) ||
+                    slotsNode.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidOperationException(
+                        $"Phone button template '{property.Name}' in 'template-compliance-policies' is " +
+                        "missing a 'slots' array.");
+                }
+                var slots = new List<TemplateComplianceSlot>();
+                foreach (var slotNode in slotsNode.EnumerateArray())
+                {
+                    if (slotNode.ValueKind != JsonValueKind.Object ||
+                        !slotNode.TryGetProperty("index", out var indexNode) ||
+                        indexNode.ValueKind != JsonValueKind.Number ||
+                        !slotNode.TryGetProperty("kind", out var kindNode) ||
+                        kindNode.ValueKind != JsonValueKind.String)
+                    {
+                        throw new InvalidOperationException(
+                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                            "an invalid slot entry; each slot needs an integer 'index' and a 'kind' of " +
+                            "'user' or 'room'.");
+                    }
+                    var index = indexNode.GetInt32();
+                    if (index <= 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                            "a slot with a non-positive index.");
+                    }
+                    var kind = kindNode.GetString()!.Trim().ToLowerInvariant() switch
+                    {
+                        "user" => TemplateComplianceSlotKind.User,
+                        "room" => TemplateComplianceSlotKind.Room,
+                        var other => throw new InvalidOperationException(
+                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                            $"an unknown slot kind '{other}'; expected 'user' or 'room'."),
+                    };
+                    slots.Add(new TemplateComplianceSlot(index, kind));
+                }
+                policies[property.Name.Trim()] = new TemplateCompliancePolicy(slots);
+            }
+            return policies;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException(
+                "CUCM setting 'template-compliance-policies' contains invalid JSON.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Evaluates a phone's CUCM description compliance based on the compliance policy configured for
+    /// its assigned phone button template (see 'template-compliance-policies'). The phone is
+    /// <see cref="TemplateComplianceStatus.Unknown"/> whenever there isn't enough configuration to make
+    /// a confident pass/fail determination (no template assigned, no policy for that template, the
+    /// device pool doesn't map to a known building, or the policy's room slot has no valid room
+    /// number). Otherwise every configured slot is checked and the phone is
+    /// <see cref="TemplateComplianceStatus.Compliant"/> only if all of them pass.
+    /// </summary>
+    internal static TemplateComplianceResult EvaluateTemplateCompliance(
+        CucmPhone phone,
+        IReadOnlyDictionary<string, TemplateCompliancePolicy> policies,
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns)
+    {
+        ArgumentNullException.ThrowIfNull(phone);
+        ArgumentNullException.ThrowIfNull(policies);
+        ArgumentNullException.ThrowIfNull(buildingPatterns);
+
+        if (string.IsNullOrWhiteSpace(phone.PhoneTemplateName))
+        {
+            return new TemplateComplianceResult(
+                TemplateComplianceStatus.Unknown, null, "No phone button template is assigned.");
+        }
+        if (!policies.TryGetValue(phone.PhoneTemplateName, out var policy) || policy.Slots.Count == 0)
+        {
+            return new TemplateComplianceResult(
+                TemplateComplianceStatus.Unknown,
+                null,
+                $"No compliance policy is configured for phone button template '{phone.PhoneTemplateName}'.");
+        }
+
+        var roomSlot = policy.Slots.FirstOrDefault(slot => slot.Kind == TemplateComplianceSlotKind.Room);
+        if (roomSlot is null)
+        {
+            return new TemplateComplianceResult(
+                TemplateComplianceStatus.Unknown,
+                null,
+                $"Phone button template '{phone.PhoneTemplateName}' has no 'room' slot in its compliance " +
+                "policy, so a room number can't be derived.");
+        }
+
+        var buildingCodes = FindBuildingCodesForDevicePool(buildingPatterns, phone.DevicePoolName);
+        if (buildingCodes.Count != 1)
+        {
+            return new TemplateComplianceResult(
+                TemplateComplianceStatus.Unknown,
+                null,
+                buildingCodes.Count == 0
+                    ? $"No 'building-patterns' entry lists device pool '{Display(phone.DevicePoolName)}'."
+                    : $"Device pool '{phone.DevicePoolName}' is listed under multiple buildings.");
+        }
+
+        var buildingCode = buildingCodes[0];
+        var buildingPattern = buildingPatterns[buildingCode];
+        var roomLine = phone.Lines.FirstOrDefault(line => line.Index == roomSlot.Index);
+        if (roomLine is null || !IsRoomNumber(roomLine.Pattern))
+        {
+            return new TemplateComplianceResult(
+                TemplateComplianceStatus.Unknown,
+                null,
+                $"Line {roomSlot.Index} has no valid 3-digit room number to derive a room number from.");
+        }
+
+        var roomNumber = buildingCode + roomLine.Pattern;
+        var failures = new List<string>();
+        if (!string.Equals(
+            roomLine.RoutePartitionName, buildingPattern.RoutePartitionName, StringComparison.OrdinalIgnoreCase))
+        {
+            failures.Add(
+                $"Line {roomSlot.Index} is in partition '{Display(roomLine.RoutePartitionName)}', expected " +
+                $"'{buildingPattern.RoutePartitionName}' for building {buildingCode}.");
+        }
+        foreach (var userSlot in policy.Slots.Where(slot => slot.Kind == TemplateComplianceSlotKind.User))
+        {
+            var userLine = phone.Lines.FirstOrDefault(line => line.Index == userSlot.Index);
+            if (userLine is null || string.IsNullOrWhiteSpace(userLine.Pattern))
+            {
+                failures.Add($"Line {userSlot.Index} is expected to have a user directory number assigned.");
+            }
+        }
+
+        return failures.Count == 0
+            ? new TemplateComplianceResult(
+                TemplateComplianceStatus.Compliant, roomNumber, "All configured compliance checks passed.")
+            : new TemplateComplianceResult(
+                TemplateComplianceStatus.NonCompliant, roomNumber, string.Join(" ", failures));
+    }
+
+    /// <summary>
+    /// Strips a previously auto-composed "&#x2714;/&#x2718; | room | text" or "? | text" wrapper from a
+    /// CUCM phone description, returning the underlying manual/raw text. Descriptions that were never
+    /// auto-composed are returned unchanged (trimmed).
+    /// </summary>
+    internal static string ExtractRawDescription(string? description)
+    {
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return string.Empty;
+        }
+        var trimmed = description.Trim();
+        var composedMatch = ComposedDescriptionPattern.Match(trimmed);
+        if (composedMatch.Success)
+        {
+            return composedMatch.Groups["raw"].Value;
+        }
+        var unknownMatch = UnknownDescriptionPattern.Match(trimmed);
+        return unknownMatch.Success ? unknownMatch.Groups["raw"].Value : trimmed;
+    }
+
+    /// <summary>
+    /// Composes the final CUCM phone description from a compliance result. Compliant/non-compliant
+    /// phones get "&#x2714;/&#x2718; | {RoomNumber} | {userOrDescription}"; phones that could not be
+    /// evaluated get "? | {rawText}" (the current/raw description, unchanged).
+    /// </summary>
+    internal static string ComposeDescription(
+        TemplateComplianceResult compliance,
+        string rawText,
+        string userOrDescription) =>
+        compliance.Status switch
+        {
+            TemplateComplianceStatus.Compliant =>
+                $"{CompliantIndicator} | {compliance.RoomNumber} | {userOrDescription}",
+            TemplateComplianceStatus.NonCompliant =>
+                $"{NonCompliantIndicator} | {compliance.RoomNumber} | {userOrDescription}",
+            _ => $"{UnknownIndicator} | {rawText}",
+        };
 
     internal static IReadOnlyList<string> FindBuildingCodesForDevicePool(
         IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,

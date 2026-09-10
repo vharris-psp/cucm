@@ -42,6 +42,34 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 
 `vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner, button template) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
 
+Each phone's **Numbers** listing (`phones` → select a phone → **Numbers**) shows every existing line plus an **Add new line** row (next available index). Selecting any line — existing or new — offers **Set directory number** (prompts for the DN, then its route partition, and works for a brand-new line the same way **Assign available user DN**/**Assign room DN** already did; it fails with button-template guidance if the line index has no free Line-type button position), **Assign available user DN**, and **Assign room DN**. Once a line actually has a DN in CUCM, two more actions appear: **Set label** and **Set caller ID** (sets the line's outbound display name), plus **Remove directory number**.
+
+## Phone descriptions and compliance
+
+The module can auto-compose each phone's CUCM **Description** as a compliance summary instead of a plain free-text field. Configure `template-compliance-policies` with `vt module configure cucm` — a JSON object mapping phone button template names to the line slots that template is expected to have filled, and what kind of DN belongs in each:
+
+```json
+{
+  "Standard 8861 SIP": {
+    "slots": [
+      { "index": 1, "kind": "user" },
+      { "index": 3, "kind": "room" }
+    ]
+  }
+}
+```
+
+- `"kind": "user"` slots must have any DN assigned.
+- `"kind": "room"` slots must have a 3-digit room number, in the route partition its building expects (from `building-patterns`); the room slot also supplies the description's `RoomNumber` (building code + room number, e.g. `HS130`).
+
+Whenever a phone is saved — provisioned, edited, assigned/reassigned to a user, or has a line's DN added/changed/removed — the Description is recomposed:
+
+- **Compliant**: `✔ | {RoomNumber} | {owner's CUCM display name, or fallback text}` (e.g. `✔ | HS130 | Victor Harris`).
+- **Non-compliant** (template assigned, policy configured, but a slot check failed): `✘ | {RoomNumber} | {owner or fallback text}`.
+- **Can't be evaluated** (no template assigned, no policy configured for the assigned template, the device pool isn't mapped to a building, or the policy's room slot has no valid room number): `? | {fallback text}`, unchanged from whatever the fallback text currently is.
+
+The "fallback text" is manual, free-form text used whenever there's no owner (or the phone can't be evaluated) — edit it via the **Edit** phone action's **Description** prompt, which shows/accepts only that raw text (not the composed `✔/✘/? | ...` wrapper); leaving it blank keeps the current fallback text unchanged. A phone button template with no entry in `template-compliance-policies` is always treated as unevaluable (`?`).
+
 ## Room DNs and building routing
 
 Configure `building-patterns` with `vt module configure cucm` — a JSON object mapping building codes to the route partition and device pools used for local room routing:
