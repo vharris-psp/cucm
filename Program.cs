@@ -30,6 +30,16 @@ return await ModuleApplication
         required: false,
         defaultValue: "{}")
     .Setting(
+        "line-templates",
+        "JSON object mapping line template names to { kind: \"room\"|\"user\", routePartitionName, " +
+            "alertingName, display, label, externalPhoneNumberMask, associateEndUser }, applied to a " +
+            "phone's line in one step via 'Set DN options' -> Apply Template (F1). String fields may " +
+            "use tokens: {room} {building} {pattern} {phoneName} {lineIndex} {devicePoolName} " +
+            "{userDisplayName} {userId}. 'room' kind ignores routePartitionName (derived from the " +
+            "phone's button template prefix against 'building-patterns' instead).",
+        required: false,
+        defaultValue: "{}")
+    .Setting(
         "phone-check-placeholder",
         "Temporary JSON assignment with userDn, roomNumber, and location",
         required: false,
@@ -1524,6 +1534,11 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     "assign-room-did",
                     ["Assign room DN", "Create or reuse a room DN by building + room number"],
                     ["phones", "room-building", phoneNameForLine, lineIndex.ToString()]),
+                new(
+                    "dn-options",
+                    ["Set DN options", "Per-field editor: partition, alerting name, caller ID, " +
+                        "label, external mask, owner (F1 to apply a template)"],
+                    ["phones", "dn-options", phoneNameForLine, lineIndex.ToString()]),
             };
             // Label/caller ID/removal require an existing line appearance with a DN in CUCM; a
             // brand-new (not-yet-assigned) index has nothing there yet to update or remove.
@@ -1546,6 +1561,62 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 $"{line?.Pattern ?? $"Line {lineIndex} (new)"} on {phoneNameForLine}",
                 ["ACTION", "CURRENT VALUE"],
                 lineRows));
+            return 0;
+        }
+        if (context.Arguments is ["dn-options", var phoneNameForDnOptions, var dnOptionsIndexText] &&
+            int.TryParse(dnOptionsIndexText, out var dnOptionsIndex) && dnOptionsIndex > 0)
+        {
+            var dnOptionsPhone = await RequirePhoneAsync(cucm, phoneNameForDnOptions, context.CancellationToken);
+            var dnOptionsLine = dnOptionsPhone.Lines.FirstOrDefault(candidate => candidate.Index == dnOptionsIndex);
+            var dnOptionsRows = new List<ModuleTableRow>
+            {
+                new(
+                    "dn",
+                    ["Directory number & partition", $"{Clean(dnOptionsLine?.Pattern)} " +
+                        $"({DisplayPartition(dnOptionsLine?.RoutePartitionName)})"],
+                    ["phones", "dn", phoneNameForDnOptions, dnOptionsIndex.ToString()]),
+            };
+            // Alerting name/caller ID/label/external mask/owner only make sense once a DN is
+            // assigned; Apply Template (F1) is how a brand-new line gets one of those from scratch.
+            if (dnOptionsLine is not null && !string.IsNullOrWhiteSpace(dnOptionsLine.Pattern))
+            {
+                var dnOptionsDn = await cucm.GetDirectoryNumberAsync(
+                    dnOptionsLine.Pattern,
+                    dnOptionsLine.RoutePartitionName,
+                    context.CancellationToken);
+                dnOptionsRows.Add(new ModuleTableRow(
+                    "alerting-name",
+                    ["Alerting name", Clean(dnOptionsDn?.AlertingName)],
+                    ["phones", "alerting-name", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
+                dnOptionsRows.Add(new ModuleTableRow(
+                    "caller-id",
+                    ["Caller ID (display)", Clean(dnOptionsLine.Display)],
+                    ["phones", "caller-id", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
+                dnOptionsRows.Add(new ModuleTableRow(
+                    "label",
+                    ["Line text label", Clean(dnOptionsLine.Label)],
+                    ["phones", "label", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
+                dnOptionsRows.Add(new ModuleTableRow(
+                    "external-mask",
+                    ["External phone number mask", Clean(dnOptionsLine.ExternalPhoneNumberMask)],
+                    ["phones", "external-mask", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
+                dnOptionsRows.Add(new ModuleTableRow(
+                    "owner",
+                    ["Owner (associated end user)", Clean(dnOptionsPhone.OwnerUserName)],
+                    ["phones", "dn-owner", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                $"DN options: {dnOptionsLine?.Pattern ?? $"line {dnOptionsIndex} (new)"} on " +
+                    $"{phoneNameForDnOptions}",
+                ["FIELD", "CURRENT VALUE"],
+                dnOptionsRows,
+                QuickActions:
+                [
+                    new ModuleQuickAction(
+                        "F1",
+                        "Apply template",
+                        ["phones", "apply-template", phoneNameForDnOptions, dnOptionsIndex.ToString()]),
+                ]));
             return 0;
         }
         if (context.Arguments is ["dn", var phoneNameForDnPrompt, var dnIndexText] &&
@@ -1897,6 +1968,316 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 $" Description: '{removeComposedDescription}'.");
             return 0;
         }
+        if (context.Arguments is ["apply-template", var phoneNameForTemplateList, var templateListIndexText] &&
+            int.TryParse(templateListIndexText, out var templateListIndex) && templateListIndex > 0)
+        {
+            _ = await RequirePhoneAsync(cucm, phoneNameForTemplateList, context.CancellationToken);
+            var templates = PhoneConfigurationChecks.ParseLineTemplates(
+                context.Configuration.GetValueOrDefault("line-templates") ?? "{}");
+            if (templates.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "CUCM setting 'line-templates' has no templates configured. Define at least one " +
+                    "template (kind 'room' or 'user') before applying one.");
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                $"Apply template to line {templateListIndex} on {phoneNameForTemplateList}",
+                ["TEMPLATE", "KIND", "ASSOCIATES OWNER"],
+                templates
+                    .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(pair => new ModuleTableRow(
+                        pair.Key,
+                        [
+                            pair.Key,
+                            pair.Value.Kind == LineTemplateKind.Room ? "Room" : "User",
+                            pair.Value.Kind == LineTemplateKind.Room
+                                ? "No (room lines never associate an owner)"
+                                : (pair.Value.AssociateEndUser ? "Yes" : "No"),
+                        ],
+                        [
+                            "phones", "apply-template-context", phoneNameForTemplateList,
+                            templateListIndex.ToString(), pair.Key,
+                        ]))
+                    .ToArray()));
+            return 0;
+        }
+        if (context.Arguments is
+            ["apply-template-context", var contextPhoneName, var contextIndexText, var contextTemplateName] &&
+            int.TryParse(contextIndexText, out var contextIndex) && contextIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, contextPhoneName, context.CancellationToken);
+            var template = RequireLineTemplate(context, contextTemplateName);
+            if (template.Kind == LineTemplateKind.Room)
+            {
+                var buildingPatterns = RequireBuildingPatterns(context);
+                var resolvedBuilding = PhoneConfigurationChecks.FindBuildingCodeForPhoneButtonTemplate(
+                    buildingPatterns, phone.PhoneTemplateName);
+                if (resolvedBuilding is not null)
+                {
+                    await context.RespondAsync(new ModuleTextPromptResponse(
+                        $"Room number for building {resolvedBuilding} (from button template " +
+                            $"'{phone.PhoneTemplateName}')",
+                        "Room number (3 digits)",
+                        [
+                            "phones", "apply-template-room-review", contextPhoneName,
+                            contextIndex.ToString(), contextTemplateName, resolvedBuilding,
+                        ]));
+                    return 0;
+                }
+                await context.RespondAsync(new ModuleTableResponse(
+                    $"Could not determine a building from button template " +
+                        $"'{Clean(phone.PhoneTemplateName)}' — select one",
+                    ["BUILDING", "PARTITION", "DEVICE POOLS"],
+                    buildingPatterns
+                        .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                        .Select(pair => new ModuleTableRow(
+                            pair.Key,
+                            [
+                                pair.Key,
+                                pair.Value.RoutePartitionName,
+                                pair.Value.DevicePoolNames.Count == 0
+                                    ? "<none>"
+                                    : string.Join(", ", pair.Value.DevicePoolNames),
+                            ],
+                            [
+                                "phones", "apply-template-room-number", contextPhoneName,
+                                contextIndex.ToString(), contextTemplateName, pair.Key,
+                            ]))
+                        .ToArray()));
+                return 0;
+            }
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Apply template '{contextTemplateName}' to line {contextIndex} on {contextPhoneName}",
+                "Directory number pattern",
+                ["phones", "apply-template-user-partition", contextPhoneName, contextIndex.ToString(),
+                    contextTemplateName]));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-room-number", var roomNumberPhoneName, var roomNumberIndexText,
+                var roomNumberTemplateName, var roomNumberBuildingCode,
+            ] &&
+            int.TryParse(roomNumberIndexText, out var roomNumberTemplateIndex) && roomNumberTemplateIndex > 0)
+        {
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Room number for building {roomNumberBuildingCode}",
+                "Room number (3 digits)",
+                [
+                    "phones", "apply-template-room-review", roomNumberPhoneName,
+                    roomNumberTemplateIndex.ToString(), roomNumberTemplateName, roomNumberBuildingCode,
+                ]));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-room-review", var roomReviewTemplatePhoneName, var roomReviewTemplateIndexText,
+                var roomReviewTemplateName, var roomReviewTemplateBuildingCode, var roomReviewTemplateNumber,
+            ] &&
+            int.TryParse(roomReviewTemplateIndexText, out var roomReviewTemplateIndex) &&
+            roomReviewTemplateIndex > 0)
+        {
+            if (!PhoneConfigurationChecks.IsRoomNumber(roomReviewTemplateNumber))
+            {
+                throw new InvalidOperationException(
+                    $"'{roomReviewTemplateNumber}' is not a valid three-digit room number.");
+            }
+            var phone = await RequirePhoneAsync(cucm, roomReviewTemplatePhoneName, context.CancellationToken);
+            var template = RequireLineTemplate(context, roomReviewTemplateName);
+            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPattern = RequireBuildingPattern(buildingPatterns, roomReviewTemplateBuildingCode);
+            await RespondWithLineTemplateReviewAsync(
+                context,
+                cucm,
+                template,
+                roomReviewTemplateName,
+                phone,
+                roomReviewTemplatePhoneName,
+                roomReviewTemplateIndex,
+                roomReviewTemplateNumber,
+                buildingPattern.RoutePartitionName,
+                ownerUserId: null,
+                room: roomReviewTemplateNumber,
+                building: roomReviewTemplateBuildingCode);
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-user-partition", var userPartitionPhoneName, var userPartitionIndexText,
+                var userPartitionTemplateName, var userPartitionPattern,
+            ] &&
+            int.TryParse(userPartitionIndexText, out var userPartitionIndex) && userPartitionIndex > 0 &&
+            !string.IsNullOrWhiteSpace(userPartitionPattern))
+        {
+            var template = RequireLineTemplate(context, userPartitionTemplateName);
+            if (!string.IsNullOrWhiteSpace(template.RoutePartitionName))
+            {
+                await RespondWithLineTemplateOwnerOrReviewAsync(
+                    context,
+                    cucm,
+                    template,
+                    userPartitionTemplateName,
+                    userPartitionPhoneName,
+                    userPartitionIndex,
+                    userPartitionPattern,
+                    template.RoutePartitionName);
+                return 0;
+            }
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Route partition for {userPartitionPattern}",
+                "Route partition (leave blank for none)",
+                [
+                    "phones", "apply-template-user-partition-review", userPartitionPhoneName,
+                    userPartitionIndex.ToString(), userPartitionTemplateName, userPartitionPattern,
+                ],
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-user-partition-review", var userPartitionReviewPhoneName,
+                var userPartitionReviewIndexText, var userPartitionReviewTemplateName,
+                var userPartitionReviewPattern, var userPartitionReviewPartitionRaw,
+            ] &&
+            int.TryParse(userPartitionReviewIndexText, out var userPartitionReviewIndex) &&
+            userPartitionReviewIndex > 0)
+        {
+            var template = RequireLineTemplate(context, userPartitionReviewTemplateName);
+            await RespondWithLineTemplateOwnerOrReviewAsync(
+                context,
+                cucm,
+                template,
+                userPartitionReviewTemplateName,
+                userPartitionReviewPhoneName,
+                userPartitionReviewIndex,
+                userPartitionReviewPattern,
+                Normalize(userPartitionReviewPartitionRaw));
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-user-owner-review", var userOwnerReviewPhoneName, var userOwnerReviewIndexText,
+                var userOwnerReviewTemplateName, var userOwnerReviewPattern, var userOwnerReviewPartitionRaw,
+                var userOwnerReviewOwnerRaw,
+            ] &&
+            int.TryParse(userOwnerReviewIndexText, out var userOwnerReviewIndex) && userOwnerReviewIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, userOwnerReviewPhoneName, context.CancellationToken);
+            var template = RequireLineTemplate(context, userOwnerReviewTemplateName);
+            await RespondWithLineTemplateReviewAsync(
+                context,
+                cucm,
+                template,
+                userOwnerReviewTemplateName,
+                phone,
+                userOwnerReviewPhoneName,
+                userOwnerReviewIndex,
+                userOwnerReviewPattern,
+                Normalize(userOwnerReviewPartitionRaw),
+                ownerUserId: Normalize(userOwnerReviewOwnerRaw),
+                room: null,
+                building: null);
+            return 0;
+        }
+        if (context.Arguments is
+            [
+                "apply-template-apply", var applyPhoneName, var applyIndexText, var applyPattern,
+                var applyPartitionRaw, var applyAlertingNameRaw, var applyDisplayRaw, var applyLabelRaw,
+                var applyExternalMaskRaw, var applyOwnerUserIdRaw,
+            ] &&
+            int.TryParse(applyIndexText, out var applyIndex) && applyIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, applyPhoneName, context.CancellationToken);
+            var applyPartition = Normalize(applyPartitionRaw);
+            var applyAlertingName = Normalize(applyAlertingNameRaw);
+            var applyDisplay = Normalize(applyDisplayRaw);
+            var applyLabel = Normalize(applyLabelRaw);
+            var applyExternalMask = Normalize(applyExternalMaskRaw);
+            var applyOwnerUserId = Normalize(applyOwnerUserIdRaw);
+
+            var existing = await cucm.GetDirectoryNumberAsync(
+                applyPattern, applyPartition, context.CancellationToken);
+            if (existing is not null &&
+                !string.Equals(
+                    Normalize(existing.RoutePartitionName),
+                    applyPartition,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"DN '{applyPattern}' already exists in partition " +
+                    $"'{DisplayPartition(existing.RoutePartitionName)}', not the expected " +
+                    $"'{DisplayPartition(applyPartition)}'. Resolve the conflict in CUCM before applying " +
+                    "this template.");
+            }
+            if (existing is null)
+            {
+                await cucm.AddDirectoryNumberAsync(
+                    new CucmDirectoryNumberCreateRequest(
+                        applyPattern,
+                        applyPartition,
+                        applyAlertingName ?? applyLabel ?? $"{applyPattern} ({DisplayPartition(applyPartition)})"),
+                    context.CancellationToken);
+            }
+
+            var lineExistedBeforeApply = phone.Lines.Any(line => line.Index == applyIndex);
+            try
+            {
+                await cucm.AssignPhoneLineDirectoryNumberAsync(
+                    applyPhoneName, applyIndex, applyPattern, applyPartition, context.CancellationToken);
+            }
+            catch (Exception assignException) when (!lineExistedBeforeApply)
+            {
+                throw new InvalidOperationException(
+                    $"Could not add a new line at index {applyIndex} on '{applyPhoneName}'. This " +
+                    $"phone's button template ('{Clean(phone.PhoneTemplateName)}') may not define a " +
+                    "Line-type button at that position. Change the phone's button template via " +
+                    $"'phones edit' to one with more line positions, then retry. CUCM error: " +
+                    $"{assignException.Message}",
+                    assignException);
+            }
+            if (applyAlertingName is not null)
+            {
+                await cucm.UpdateDirectoryNumberAsync(
+                    new CucmDirectoryNumberUpdateRequest(
+                        applyPattern, applyPartition, AlertingName: applyAlertingName),
+                    context.CancellationToken);
+            }
+            if (applyDisplay is not null)
+            {
+                await cucm.UpdatePhoneLineDisplayAsync(
+                    applyPhoneName, applyIndex, applyDisplay, applyDisplay, context.CancellationToken);
+            }
+            if (applyLabel is not null)
+            {
+                await cucm.UpdatePhoneLineLabelAsync(
+                    applyPhoneName, applyIndex, applyLabel, context.CancellationToken);
+            }
+            if (applyExternalMask is not null)
+            {
+                await cucm.UpdatePhoneLineExternalMaskAsync(
+                    applyPhoneName, applyIndex, applyExternalMask, context.CancellationToken);
+            }
+            if (applyOwnerUserId is not null)
+            {
+                await cucm.UpdatePhoneAsync(
+                    applyPhoneName, null, null, applyOwnerUserId, context.CancellationToken);
+                if (!string.IsNullOrWhiteSpace(phone.OwnerUserName) &&
+                    !phone.OwnerUserName.Equals(applyOwnerUserId, StringComparison.OrdinalIgnoreCase))
+                {
+                    await RemovePhoneFromPreviousOwnerAsync(
+                        cucm, phone.OwnerUserName, applyPhoneName, context.CancellationToken);
+                }
+            }
+            var applyComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, applyPhoneName, null, context.CancellationToken);
+            context.Output.WriteLine(
+                $"Applied template to line {applyIndex} on {applyPhoneName}: DN '{applyPattern}' " +
+                $"({DisplayPartition(applyPartition)})" +
+                (existing is null ? " (created in CUCM)" : string.Empty) +
+                (applyOwnerUserId is null ? string.Empty : $", owner '{applyOwnerUserId}'") +
+                $". Description: '{applyComposedDescription}'.");
+            return 0;
+        }
         if (context.Arguments is ["label", var phoneNameForPrompt, var labelIndexText] &&
             int.TryParse(labelIndexText, out var labelIndex) && labelIndex > 0)
         {
@@ -1954,6 +2335,141 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             context.Output.WriteLine(
                 $"Updated line {callerIdUpdateIndex} on {phoneNameForCallerIdUpdate} with caller ID " +
                 $"'{newCallerId}'.");
+            return 0;
+        }
+        if (context.Arguments is
+            ["alerting-name", var phoneNameForAlertingPrompt, var alertingIndexText] &&
+            int.TryParse(alertingIndexText, out var alertingIndex) && alertingIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm, phoneNameForAlertingPrompt, alertingIndex, context.CancellationToken);
+            var dn = await cucm.GetDirectoryNumberAsync(
+                line.Pattern!, line.RoutePartitionName, context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Set alerting name for {line.Pattern ?? $"line {alertingIndex}"}",
+                "Alerting name (shown on the called party's phone)",
+                ["phones", "set-alerting-name", phoneNameForAlertingPrompt, alertingIndex.ToString()],
+                dn?.AlertingName,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            ["set-alerting-name", var phoneNameForAlertingUpdate, var alertingUpdateIndexText,
+                var newAlertingName] &&
+            int.TryParse(alertingUpdateIndexText, out var alertingUpdateIndex) && alertingUpdateIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm, phoneNameForAlertingUpdate, alertingUpdateIndex, context.CancellationToken);
+            await cucm.UpdateDirectoryNumberAsync(
+                new CucmDirectoryNumberUpdateRequest(
+                    line.Pattern!,
+                    line.RoutePartitionName,
+                    AlertingName: newAlertingName),
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated {line.Pattern} with alerting name '{newAlertingName}'.");
+            return 0;
+        }
+        if (context.Arguments is
+            ["external-mask", var phoneNameForMaskPrompt, var maskIndexText] &&
+            int.TryParse(maskIndexText, out var maskIndex) && maskIndex > 0)
+        {
+            var line = await RequireLineAsync(
+                cucm, phoneNameForMaskPrompt, maskIndex, context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Set external phone number mask for {line.Pattern ?? $"line {maskIndex}"}",
+                "External phone number mask (e.g. 555XXXX)",
+                ["phones", "set-external-mask", phoneNameForMaskPrompt, maskIndex.ToString()],
+                line.ExternalPhoneNumberMask,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            ["set-external-mask", var phoneNameForMaskUpdate, var maskUpdateIndexText, var newMask] &&
+            int.TryParse(maskUpdateIndexText, out var maskUpdateIndex) && maskUpdateIndex > 0)
+        {
+            await cucm.UpdatePhoneLineExternalMaskAsync(
+                phoneNameForMaskUpdate,
+                maskUpdateIndex,
+                newMask,
+                context.CancellationToken);
+            context.Output.WriteLine(
+                $"Updated line {maskUpdateIndex} on {phoneNameForMaskUpdate} with external phone " +
+                $"number mask '{newMask}'.");
+            return 0;
+        }
+        if (context.Arguments is
+            ["dn-owner", var phoneNameForOwnerPrompt, var ownerIndexText] &&
+            int.TryParse(ownerIndexText, out var ownerIndex) && ownerIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, phoneNameForOwnerPrompt, context.CancellationToken);
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Set owner for line {ownerIndex} on {phoneNameForOwnerPrompt}",
+                "Owner user ID (leave blank to clear... " +
+                    "note: CUCM currently leaves an existing owner unchanged if left blank)",
+                ["phones", "dn-owner-review", phoneNameForOwnerPrompt, ownerIndex.ToString()],
+                phone.OwnerUserName,
+                AllowEmpty: true));
+            return 0;
+        }
+        if (context.Arguments is
+            ["dn-owner-review", var phoneNameForOwnerReview, var ownerReviewIndexText, var ownerReviewUserId] &&
+            int.TryParse(ownerReviewIndexText, out var ownerReviewIndex) && ownerReviewIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, phoneNameForOwnerReview, context.CancellationToken);
+            var newOwnerId = Normalize(ownerReviewUserId);
+            if (newOwnerId is not null)
+            {
+                // Validate early so a typo doesn't silently no-op the phone update below.
+                await RequireUserAsync(cucm, newOwnerId, context.CancellationToken);
+            }
+            await context.RespondAsync(new ModuleTableResponse(
+                "Review owner change",
+                ["PHONE", "LINE", "CURRENT OWNER", "NEW OWNER", "ACTION"],
+                [
+                    new ModuleTableRow(
+                        "submit",
+                        [
+                            phoneNameForOwnerReview,
+                            ownerReviewIndex.ToString(),
+                            Clean(phone.OwnerUserName),
+                            newOwnerId ?? "<none>",
+                            newOwnerId is null
+                                ? "Leave unchanged (CUCM cannot clear an owner via this API)"
+                                : OwnerActionLabel(phone.OwnerUserName, newOwnerId),
+                        ],
+                        [
+                            "phones", "set-dn-owner", phoneNameForOwnerReview, ownerReviewIndex.ToString(),
+                            ownerReviewUserId,
+                        ]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+            return 0;
+        }
+        if (context.Arguments is
+            ["set-dn-owner", var phoneNameForOwnerUpdate, var ownerUpdateIndexText, var ownerUpdateUserIdRaw] &&
+            int.TryParse(ownerUpdateIndexText, out var ownerUpdateIndex) && ownerUpdateIndex > 0)
+        {
+            var phone = await RequirePhoneAsync(cucm, phoneNameForOwnerUpdate, context.CancellationToken);
+            var newOwnerId = Normalize(ownerUpdateUserIdRaw);
+            if (newOwnerId is not null)
+            {
+                await cucm.UpdatePhoneAsync(
+                    phoneNameForOwnerUpdate, null, null, newOwnerId, context.CancellationToken);
+                if (!string.IsNullOrWhiteSpace(phone.OwnerUserName) &&
+                    !phone.OwnerUserName.Equals(newOwnerId, StringComparison.OrdinalIgnoreCase))
+                {
+                    await RemovePhoneFromPreviousOwnerAsync(
+                        cucm, phone.OwnerUserName, phoneNameForOwnerUpdate, context.CancellationToken);
+                }
+            }
+            var ownerComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
+                context, cucm, phoneNameForOwnerUpdate, null, context.CancellationToken);
+            context.Output.WriteLine(
+                (newOwnerId is null
+                    ? $"Left the owner of {phoneNameForOwnerUpdate} unchanged."
+                    : $"Set the owner of {phoneNameForOwnerUpdate} to '{newOwnerId}'.") +
+                $" Description: '{ownerComposedDescription}'.");
             return 0;
         }
         if (context.Arguments is ["add"])
@@ -2499,6 +3015,111 @@ static void EnsureRoomDidCanBeAssigned(
             $"Room DN '{roomNumber}' already exists in partition '{DisplayPartition(existing.RoutePartitionName)}', " +
             $"not the expected '{expectedRoutePartitionName}'. Resolve the conflict in CUCM before assigning it.");
     }
+}
+
+static LineTemplate RequireLineTemplate(ModuleContext context, string templateName)
+{
+    var templates = PhoneConfigurationChecks.ParseLineTemplates(
+        context.Configuration.GetValueOrDefault("line-templates") ?? "{}");
+    return templates.TryGetValue(templateName, out var template)
+        ? template
+        : throw new InvalidOperationException(
+            $"Line template '{templateName}' is not present in the 'line-templates' setting.");
+}
+
+// For "user" kind templates: prompts for an owner (if the template calls for one), otherwise
+// proceeds straight to the review screen with no owner.
+static async Task RespondWithLineTemplateOwnerOrReviewAsync(
+    ModuleContext context,
+    CucmService cucm,
+    LineTemplate template,
+    string templateName,
+    string phoneName,
+    int lineIndex,
+    string pattern,
+    string? routePartitionName)
+{
+    if (template.AssociateEndUser)
+    {
+        var phoneForOwnerPrompt = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
+        await context.RespondAsync(new ModuleTextPromptResponse(
+            $"Owner for {pattern}",
+            "Owner user ID (leave blank for none)",
+            [
+                "phones", "apply-template-user-owner-review", phoneName, lineIndex.ToString(),
+                templateName, pattern, routePartitionName ?? string.Empty,
+            ],
+            phoneForOwnerPrompt.OwnerUserName,
+            AllowEmpty: true));
+        return;
+    }
+    var phone = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
+    await RespondWithLineTemplateReviewAsync(
+        context, cucm, template, templateName, phone, phoneName, lineIndex, pattern,
+        routePartitionName, ownerUserId: null, room: null, building: null);
+}
+
+// Substitutes the template's tokens against the resolved context, then renders a single-row
+// "review" table (Save-confirmed) whose row Arguments carry every concrete resolved value forward
+// to 'apply-template-apply'. Null substituted fields mean "leave unchanged" and are not written.
+static async Task RespondWithLineTemplateReviewAsync(
+    ModuleContext context,
+    CucmService cucm,
+    LineTemplate template,
+    string templateName,
+    VSharp.Cucm.Models.CucmPhone phone,
+    string phoneName,
+    int lineIndex,
+    string pattern,
+    string? routePartitionName,
+    string? ownerUserId,
+    string? room,
+    string? building)
+{
+    string? userDisplayName = null;
+    if (ownerUserId is not null)
+    {
+        var owner = await RequireUserAsync(cucm, ownerUserId, context.CancellationToken);
+        userDisplayName = Normalize(owner.DisplayName) ??
+            Normalize(string.Join(
+                " ",
+                new[] { owner.FirstName, owner.LastName }.Where(part => !string.IsNullOrWhiteSpace(part))));
+    }
+
+    string? Substitute(string? value) => Normalize(PhoneConfigurationChecks.SubstituteLineTemplateTokens(
+        value, room, building, pattern, phoneName, lineIndex.ToString(), phone.DevicePoolName,
+        userDisplayName, ownerUserId));
+
+    var alertingName = Substitute(template.AlertingName);
+    var display = Substitute(template.Display);
+    var label = Substitute(template.Label);
+    var externalMask = Substitute(template.ExternalPhoneNumberMask);
+
+    var existing = await cucm.GetDirectoryNumberAsync(pattern, routePartitionName, context.CancellationToken);
+
+    await context.RespondAsync(new ModuleTableResponse(
+        $"Review template '{templateName}' for line {lineIndex} on {phoneName}",
+        ["DN", "PARTITION", "DN ACTION", "ALERTING NAME", "CALLER ID", "LABEL", "EXTERNAL MASK", "OWNER"],
+        [
+            new ModuleTableRow(
+                "submit",
+                [
+                    pattern,
+                    DisplayPartition(routePartitionName),
+                    existing is null ? "Create in CUCM" : "Use existing CUCM DN",
+                    alertingName ?? "<unchanged>",
+                    display ?? "<unchanged>",
+                    label ?? "<unchanged>",
+                    externalMask ?? "<unchanged>",
+                    ownerUserId is null ? "<unchanged>" : $"{ownerUserId} ({OwnerActionLabel(phone.OwnerUserName, ownerUserId)})",
+                ],
+                [
+                    "phones", "apply-template-apply", phoneName, lineIndex.ToString(), pattern,
+                    routePartitionName ?? string.Empty, alertingName ?? string.Empty, display ?? string.Empty,
+                    label ?? string.Empty, externalMask ?? string.Empty, ownerUserId ?? string.Empty,
+                ]),
+        ],
+        SubmitMode: ModuleTableSubmitMode.Save));
 }
 
 static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)

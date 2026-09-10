@@ -58,6 +58,31 @@ internal sealed record TemplateComplianceResult(
     string? RoomNumber,
     string Detail);
 
+internal enum LineTemplateKind
+{
+    Room,
+    User,
+}
+
+/// <summary>
+/// A named preset applied to a single phone line in one step (see the 'line-templates' setting).
+/// Every string field may reference the tokens documented in
+/// <see cref="PhoneConfigurationChecks.ApplyLineTemplateTokens"/> (e.g. "{room}", "{userDisplayName}")
+/// and is substituted at apply-time. A null/absent field means "leave that CUCM value unchanged" when
+/// applied. For <see cref="LineTemplateKind.Room"/> templates, <see cref="RoutePartitionName"/> is
+/// ignored — the partition is always derived from the building resolved from the phone's
+/// button-template-name prefix (see
+/// <see cref="PhoneConfigurationChecks.FindBuildingCodeForPhoneButtonTemplate"/>).
+/// </summary>
+internal sealed record LineTemplate(
+    LineTemplateKind Kind,
+    string? RoutePartitionName,
+    string? AlertingName,
+    string? Display,
+    string? Label,
+    string? ExternalPhoneNumberMask,
+    bool AssociateEndUser);
+
 internal static class PhoneConfigurationChecks
 {
     internal const string CompliantIndicator = "\u2714";
@@ -290,6 +315,67 @@ internal static class PhoneConfigurationChecks
         }
     }
 
+    internal static IReadOnlyDictionary<string, LineTemplate> ParseLineTemplates(string configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration))
+        {
+            return new Dictionary<string, LineTemplate>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(configuration);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException("CUCM setting 'line-templates' must be a JSON object.");
+            }
+
+            var templates = new Dictionary<string, LineTemplate>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (string.IsNullOrWhiteSpace(property.Name) ||
+                    property.Value.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(
+                        "CUCM setting 'line-templates' must map template names to objects with a 'kind' " +
+                        "of 'room' or 'user'.");
+                }
+                if (!property.Value.TryGetProperty("kind", out var kindNode) ||
+                    kindNode.ValueKind != JsonValueKind.String)
+                {
+                    throw new InvalidOperationException(
+                        $"Line template '{property.Name}' in 'line-templates' is missing a 'kind' of " +
+                        "'room' or 'user'.");
+                }
+                var kind = kindNode.GetString()!.Trim().ToLowerInvariant() switch
+                {
+                    "room" => LineTemplateKind.Room,
+                    "user" => LineTemplateKind.User,
+                    var other => throw new InvalidOperationException(
+                        $"Line template '{property.Name}' in 'line-templates' has an unknown kind " +
+                        $"'{other}'; expected 'room' or 'user'."),
+                };
+                var associateEndUser = property.Value.TryGetProperty("associateEndUser", out var associateNode) &&
+                    associateNode.ValueKind == JsonValueKind.True;
+                templates[property.Name.Trim()] = new LineTemplate(
+                    kind,
+                    ReadString(property.Value, "routePartitionName"),
+                    ReadString(property.Value, "alertingName"),
+                    ReadString(property.Value, "display"),
+                    ReadString(property.Value, "label"),
+                    ReadString(property.Value, "externalPhoneNumberMask"),
+                    associateEndUser);
+            }
+            return templates;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException(
+                "CUCM setting 'line-templates' contains invalid JSON.",
+                exception);
+        }
+    }
+
     /// <summary>
     /// Evaluates a phone's CUCM description compliance based on the compliance policy configured for
     /// its assigned phone button template (see 'template-compliance-policies'). The phone is
@@ -431,6 +517,71 @@ internal static class PhoneConfigurationChecks
                 pool.Equals(devicePoolName, StringComparison.OrdinalIgnoreCase)))
             .Select(pair => pair.Key)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Resolves a building code from the prefix of a phone button template name (e.g. "CE" from
+    /// "CE-UserRoom"), validated against the known building codes in 'building-patterns'. Returns the
+    /// canonically-cased building code, or null if the template name has no recognizable prefix or the
+    /// prefix doesn't match any configured building.
+    /// </summary>
+    internal static string? FindBuildingCodeForPhoneButtonTemplate(
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+        string? phoneButtonTemplateName)
+    {
+        ArgumentNullException.ThrowIfNull(buildingPatterns);
+        if (string.IsNullOrWhiteSpace(phoneButtonTemplateName))
+        {
+            return null;
+        }
+        var separatorIndex = phoneButtonTemplateName.IndexOf('-');
+        var prefix = (separatorIndex > 0 ? phoneButtonTemplateName[..separatorIndex] : phoneButtonTemplateName).Trim();
+        if (prefix.Length == 0)
+        {
+            return null;
+        }
+        return buildingPatterns.Keys.FirstOrDefault(code => code.Equals(prefix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Token names recognized inside 'line-templates' string fields (alerting name, display, label,
+    /// external mask). Unrecognized tokens are left as-is in the output.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> ApplyLineTemplateTokens =
+    [
+        "{room}", "{building}", "{pattern}", "{phoneName}", "{lineIndex}",
+        "{devicePoolName}", "{userDisplayName}", "{userId}",
+    ];
+
+    /// <summary>
+    /// Substitutes the tokens in <see cref="ApplyLineTemplateTokens"/> within a template string. Any
+    /// token whose corresponding value is null is replaced with an empty string. Returns null unchanged
+    /// (meaning "leave this field unchanged").
+    /// </summary>
+    internal static string? SubstituteLineTemplateTokens(
+        string? value,
+        string? room = null,
+        string? building = null,
+        string? pattern = null,
+        string? phoneName = null,
+        string? lineIndex = null,
+        string? devicePoolName = null,
+        string? userDisplayName = null,
+        string? userId = null)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+        return value
+            .Replace("{room}", room ?? string.Empty)
+            .Replace("{building}", building ?? string.Empty)
+            .Replace("{pattern}", pattern ?? string.Empty)
+            .Replace("{phoneName}", phoneName ?? string.Empty)
+            .Replace("{lineIndex}", lineIndex ?? string.Empty)
+            .Replace("{devicePoolName}", devicePoolName ?? string.Empty)
+            .Replace("{userDisplayName}", userDisplayName ?? string.Empty)
+            .Replace("{userId}", userId ?? string.Empty);
     }
 
     internal static bool IsRoomNumber(string? value) =>

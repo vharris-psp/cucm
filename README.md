@@ -42,7 +42,39 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 
 `vt cucm phones` lists phones; selecting one opens **Edit** (description, device pool, owner, button template) alongside the existing line-label and DN-slot actions. `vt cucm phones add` walks through name, description, product, device pool, phone button template, and security profile before review.
 
-Each phone's **Numbers** listing (`phones` → select a phone → **Numbers**) shows every existing line plus an **Add new line** row (next available index). Selecting any line — existing or new — offers **Set directory number** (prompts for the DN, then its route partition, and works for a brand-new line the same way **Assign available user DN**/**Assign room DN** already did; it fails with button-template guidance if the line index has no free Line-type button position), **Assign available user DN**, and **Assign room DN**. Once a line actually has a DN in CUCM, two more actions appear: **Set label** and **Set caller ID** (sets the line's outbound display name), plus **Remove directory number**.
+Each phone's **Numbers** listing (`phones` → select a phone → **Numbers**) shows every existing line plus an **Add new line** row (next available index). Selecting any line — existing or new — offers **Set directory number** (prompts for the DN, then its route partition, and works for a brand-new line the same way **Assign available user DN**/**Assign room DN** already did; it fails with button-template guidance if the line index has no free Line-type button position), **Assign available user DN**, **Assign room DN**, and **Set DN options** (see below). Once a line actually has a DN in CUCM, two more actions appear: **Set label** and **Set caller ID** (sets the line's outbound display name), plus **Remove directory number**.
+
+## Set DN options and line templates
+
+**Set DN options** (`phones` → select a phone → **Numbers** → select a line → **Set DN options**) is a per-field editor for everything on a line beyond the bare DN/partition: **Directory number & partition** (reuses **Set directory number**), **Alerting name**, **Caller ID (display)**, **Line text label**, **External phone number mask**, and **Owner (associated end user)**. Alerting name, caller ID, and external mask prompts preload the field's current CUCM value. Alerting name and external mask/owner-only edits are new dedicated single-field actions (`alerting-name`, `external-mask`, `dn-owner`); label and caller ID reuse the existing actions. The owner-only edit shows a review screen (Ctrl+Enter/Cmd+Enter to save) whose **ACTION** column states whether it's setting a new owner, keeping the current one, or replacing a different one — same convention as the users-assign flow.
+
+Press **F1 (Apply template)** from Set DN options to fill every field in one step from a named preset instead of editing them one at a time. Configure presets with `vt module configure cucm`'s `line-templates` setting — a JSON object mapping template names to:
+
+```json
+{
+  "HS-Classroom-Room": {
+    "kind": "room",
+    "alertingName": "Room {room}",
+    "display": "HS Room {room}",
+    "label": "Rm {room}"
+  },
+  "HS-Staff-User": {
+    "kind": "user",
+    "routePartitionName": "HS-Users",
+    "alertingName": "{userDisplayName}",
+    "display": "{userDisplayName}",
+    "label": "{userDisplayName}",
+    "externalPhoneNumberMask": "555XXXX",
+    "associateEndUser": true
+  }
+}
+```
+
+- `kind: "room"` templates ignore `routePartitionName` and `associateEndUser` — the partition is always derived from the building resolved from the phone's **phone button template name prefix** (e.g. `HS` from `HS-UserRoom`) matched case-insensitively against the `building-patterns` setting's keys, and a room line never gets an owner. If the prefix can't be resolved, Apply Template falls back to a building selector before prompting for the room number.
+- `kind: "user"` templates prompt for a DN pattern (typed manually — the local approved user-DN inventory isn't consulted here), and for a route partition too if the template doesn't supply one. When `associateEndUser` is `true`, it then prompts for an owner user ID (preloaded with the phone's current owner); leaving it blank applies no owner.
+- Any string field may use tokens `{room}`, `{building}`, `{pattern}`, `{phoneName}`, `{lineIndex}`, `{devicePoolName}`, `{userDisplayName}`, `{userId}` (substituted from the resolved context; unresolved tokens for a `room` template, like `{userDisplayName}`, substitute to empty). A field omitted from the template is left unchanged in CUCM rather than blanked out.
+
+After gathering context, Apply Template shows a Save-gated review of every resolved field (DN, partition, alerting name, caller ID, label, external mask, owner) before writing anything — creating the DN in CUCM if it doesn't already exist, assigning it to the line, and applying the remaining fields and (if applicable) the owner, with the same replace-with-confirmation behavior as other owner-setting flows.
 
 ## Phone descriptions and compliance
 
