@@ -1327,6 +1327,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     1,
                     1);
             }
+            rows.Add(new ModuleTableRow(
+                "add",
+                ["<Add phone>", "Create a new, unregistered CUCM phone shell from scratch", "", "", ""],
+                ["phones", "add"]));
             await context.RespondAsync(new ModuleTableResponse(
                 "CUCM phones",
                 ["NAME", "DESCRIPTION", "MODEL", "PROTOCOL", "OWNER"],
@@ -2572,7 +2576,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             context.Output.WriteLine(
                 $"Created phone '{createState.Name}'" +
                 (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid}).") +
-                $" Description: '{addComposedDescription}'.");
+                $" Description: '{addComposedDescription}'." +
+                $" Use 'phones select {createState.Name}' -> Numbers to assign its lines/DNs.");
             return 0;
         }
         if (context.Arguments is ["edit", var editPhoneName])
