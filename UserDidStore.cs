@@ -216,6 +216,31 @@ internal sealed class UserDidStore(string dataDirectory)
         await SaveCoreAsync(dids, ct);
     }
 
+    internal async Task<bool> ClearAssignmentAsync(
+        string phoneName,
+        int lineIndex,
+        CancellationToken ct = default)
+    {
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        var dids = (await LoadCoreAsync(ct)).ToList();
+        var changed = false;
+        for (var index = 0; index < dids.Count; index++)
+        {
+            if (dids[index].Assignment is { } assignment &&
+                assignment.PhoneName.Equals(phoneName, StringComparison.OrdinalIgnoreCase) &&
+                assignment.LineIndex == lineIndex)
+            {
+                dids[index] = dids[index] with { Assignment = null };
+                changed = true;
+            }
+        }
+        if (changed)
+        {
+            await SaveCoreAsync(dids, ct);
+        }
+        return changed;
+    }
+
     internal static IReadOnlyList<string> ParsePatterns(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
