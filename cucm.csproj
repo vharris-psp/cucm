@@ -5,6 +5,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-  <AssemblyName>vt-module-cucm</AssemblyName><PublishAot>true</PublishAot><PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><InvariantGlobalization>true</InvariantGlobalization><Version>0.8.1</Version></PropertyGroup>
+  <AssemblyName>vt-module-cucm</AssemblyName><PublishAot>true</PublishAot><PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><InvariantGlobalization>true</InvariantGlobalization><Version>0.8.2</Version></PropertyGroup>
 
 <ItemGroup><ProjectReference Include="libs/VTModuleSDK/dotnet/src/Vt.ModuleSdk/Vt.ModuleSdk.csproj" /><ProjectReference Include="libs/VSharp/VSharp.Cucm/VSharp.Cucm.csproj" /><Compile Remove="libs/VTModuleSDK/**/*.cs" /><Compile Remove="libs/VSharp/**/*.cs" /><Compile Remove="tests/**/*.cs" /></ItemGroup></Project>
