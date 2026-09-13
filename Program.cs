@@ -1,6 +1,8 @@
 using Vt.ModuleSdk;
 using VSharp.Cucm;
 using VSharp.Cucm.Models;
+using VSharp.Patterns.Strings;
+using System.Reflection;
 
 return await ModuleApplication
     .Create("cucm", "CUCM")
@@ -2479,10 +2481,21 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         if (context.Arguments is ["add"])
         {
             await context.RespondAsync(new ModuleTextPromptResponse(
-                "Add CUCM phone",
-                "Phone name",
-                ["phones", "add-description"]));
+                "Add CUCM Phone", 
+                "MAC address", 
+                ["phones", "add-mac"])); 
             return 0;
+        }
+        if (context.Arguments is ["add-mac", var macRaw] && MACAddress.TryParse(macRaw, out var mac))
+        {
+            var macPhoneName = $"SEP{mac!.Value}";
+            await context.RespondAsync(new ModuleTextPromptResponse(
+                $"Add phone {macPhoneName}",
+                "Description",
+                ["phones", "add-product", macPhoneName],
+                AllowEmpty: true));
+            return 0;
+
         }
         if (context.Arguments is ["add-description", var addName] &&
             !string.IsNullOrWhiteSpace(addName))

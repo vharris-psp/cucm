@@ -484,6 +484,38 @@ internal static class PhoneConfigurationChecks
         var unknownMatch = UnknownDescriptionPattern.Match(trimmed);
         return unknownMatch.Success ? unknownMatch.Groups["raw"].Value : trimmed;
     }
+    /// <summary>
+    /// Try to extract a compliant room number / location from the CUCM phone description.
+    /// </summary> 
+    internal static bool TryExtractCompliantLocation(
+        string? description,
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+        out string? buildingCode, 
+        out string? roomNumber)
+    {
+        buildingCode = null; 
+        roomNumber = null; 
+        if (string.IsNullOrWhiteSpace(description) || !description.StartsWith(CompliantIndicator))
+        {
+            return false; 
+        }
+        var match = ComposedDescriptionPattern.Match(description.Trim()); 
+        if (!match.Success)
+        {
+            return false; 
+        }
+        var roomField = description.Trim().Split('|', 3)[1].Trim(); 
+        var code = buildingPatterns.Keys.FirstOrDefault(k=> roomField.StartsWith(k, StringComparison.OrdinalIgnoreCase)); 
+        if (code is null)
+        {
+            return false;
+        }
+        buildingCode = code; 
+        roomNumber = roomField[code.Length..]; 
+        return IsRoomNumber(roomNumber) ? true : throw new InvalidOperationException(
+            $"Compliant description room field '{roomField}' has an invalid room number after building code '{code}'.");
+
+    }
 
     /// <summary>
     /// Composes the final CUCM phone description from a compliance result. Compliant/non-compliant
