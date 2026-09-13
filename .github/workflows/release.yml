@@ -49,6 +49,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+      - name: Test
+        shell: bash
+        run: |
+          dotnet test tests/cucm.Tests/cucm.Tests.csproj \
+            --configuration Release \
+            -p:PublishAot=false \
+            -m:1
       - name: Publish module
         shell: bash
         run: |

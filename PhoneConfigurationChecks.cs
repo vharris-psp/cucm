@@ -32,7 +32,8 @@ internal sealed record PhoneCheckResult(
 
 internal sealed record BuildingPattern(
     string RoutePartitionName,
-    IReadOnlyList<string> DevicePoolNames);
+    IReadOnlyList<string> DevicePoolNames,
+    string? PhoneTemplateName = null);
 
 internal enum TemplateComplianceSlotKind
 {
@@ -81,7 +82,9 @@ internal sealed record LineTemplate(
     string? Display,
     string? Label,
     string? ExternalPhoneNumberMask,
-    bool AssociateEndUser);
+    bool AssociateEndUser,
+    string? VoiceMailProfileName = null,
+    string? Pattern = null);
 
 internal static class PhoneConfigurationChecks
 {
@@ -96,6 +99,25 @@ internal static class PhoneConfigurationChecks
     private static readonly Regex UnknownDescriptionPattern = new(
         @"^\?\s*\|\s*(?<raw>.*)$",
         RegexOptions.Singleline);
+
+    internal static string RequireClassroomPhoneTemplate(
+        string? phoneTemplateName,
+        IReadOnlyDictionary<string, TemplateCompliancePolicy> policies)
+    {
+        var normalized = Normalize(phoneTemplateName) ??
+            throw new InvalidOperationException(
+                "The classroom flow requires either the selected building's 'phoneTemplateName' or an " +
+                "existing phone button template.");
+        if (!policies.TryGetValue(normalized, out var policy) ||
+            !policy.Slots.Any(slot => slot.Index == 1 && slot.Kind == TemplateComplianceSlotKind.User) ||
+            !policy.Slots.Any(slot => slot.Index == 3 && slot.Kind == TemplateComplianceSlotKind.Room))
+        {
+            throw new InvalidOperationException(
+                $"Phone button template '{normalized}' must have a 'template-compliance-policies' entry " +
+                "with user slot 1 and room slot 3 before it can be applied by the classroom flow.");
+        }
+        return normalized;
+    }
     internal static PhoneAssignment ResolvePlaceholderAssignment(
         CucmPhone phone,
         string configuration)
@@ -226,7 +248,8 @@ internal static class PhoneConfigurationChecks
                 }
                 patterns[property.Name.Trim()] = new BuildingPattern(
                     routePartitionName!,
-                    devicePools);
+                    devicePools,
+                    ReadString(property.Value, "phoneTemplateName"));
             }
             return patterns;
         }
@@ -364,7 +387,9 @@ internal static class PhoneConfigurationChecks
                     ReadString(property.Value, "display"),
                     ReadString(property.Value, "label"),
                     ReadString(property.Value, "externalPhoneNumberMask"),
-                    associateEndUser);
+                    associateEndUser,
+                    ReadString(property.Value, "voiceMailProfileName"),
+                    ReadString(property.Value, "pattern"));
             }
             return templates;
         }

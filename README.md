@@ -108,12 +108,22 @@ Configure `building-patterns` with `vt module configure cucm` — a JSON object 
 
 ```json
 {
-  "PHS": { "routePartitionName": "PHS-Rooms", "devicePools": ["PHS-DP-Classrooms", "PHS-DP-Office"] },
-  "MS":  { "routePartitionName": "MS-Rooms",  "devicePools": ["MS-DP-Classrooms"] }
+  "PHS": {
+    "routePartitionName": "PHS-Rooms",
+    "devicePools": ["PHS-DP-Classrooms"],
+    "phoneTemplateName": "PHS-UserRoom"
+  },
+  "MS": {
+    "routePartitionName": "MS-Rooms",
+    "devicePools": ["MS-DP-Classrooms"],
+    "phoneTemplateName": "MS-UserRoom"
+  }
 }
 ```
 
-Each building's `devicePools` list should be disjoint — a device pool listed under two buildings is flagged as a configuration error by the room-routing check below, since it makes the building unresolvable from the phone alone.
+Each building's `devicePools` list should be disjoint — a device pool listed under two buildings is flagged as a configuration error by the room-routing check below, since it makes the building unresolvable from the phone alone. `phoneTemplateName` is optional for audits; the classroom workflow applies it when present, or retains the phone's current button template otherwise.
+
+From an existing phone, choose **Apply classroom template**, then select a building, room number, and user. Before showing the Save action, the module verifies that the effective phone button template has a `template-compliance-policies` entry containing user slot 1 and room slot 3, resolves the user's actual CUCM DN partition, checks the room DN for partition conflicts, and confirms both `classroom-user` and `classroom-room` line templates exist. Saving applies the building's device pool and phone button template, assigns and formats both lines, sets the phone owner and user-device association, and recomposes the compliance description. Repeating the operation for the same phone, user, and slot is supported after a partial failure.
 
 From a phone's line menu (`vt cucm phones` → select a phone → **Numbers** → select a line), choose **Assign room DN** to select a building, enter a 3-digit room number, then review and save. The module creates the DN in the building's partition if it doesn't already exist (rejecting a room number that already exists in a *different* partition) and assigns it to the line — no local inventory entry is created, since room DNs are provisioned on demand rather than drawn from the approved user-DN pool.
 

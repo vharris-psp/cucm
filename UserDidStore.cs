@@ -189,7 +189,10 @@ internal sealed class UserDidStore(string dataDirectory)
             throw new InvalidOperationException(
                 $"User DID '{pattern}' is no longer present in the local inventory.");
         }
-        if (dids[target].Assignment is not null)
+        if (dids[target].Assignment is { } existingAssignment &&
+            !(existingAssignment.PhoneName.Equals(phoneName, StringComparison.OrdinalIgnoreCase) &&
+              existingAssignment.LineIndex == lineIndex &&
+              string.Equals(existingAssignment.UserId, Normalize(userId), StringComparison.OrdinalIgnoreCase)))
         {
             throw new InvalidOperationException(
                 $"User DID '{pattern}' is no longer available.");
