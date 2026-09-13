@@ -6,5 +6,5 @@
 /.vt/cache/
 /.vt/tmp/
 /artifacts/
-/bin/
-/obj/
+**/bin/
+**/obj/

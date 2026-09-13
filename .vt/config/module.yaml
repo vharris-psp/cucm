@@ -5,7 +5,7 @@ language: csharp
 entrypoint: vt-module-cucm
 asset_pattern: vt-module-cucm-{os}-{arch}
 protocol:
-  minimum: 1.0
+  minimum: 1.1
   maximum: 1.x
 capabilities: [configuration.v1, secrets.v1, storage.sqlite.v1]
 agent_components: []

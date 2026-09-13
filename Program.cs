@@ -73,95 +73,103 @@ return await ModuleApplication
     .Command(
         "users",
         "Browse CUCM users and their phones through AXL.",
+        ModuleCommandState.Implemented,
         UsersAsync,
         ModuleResponseKind.Table)
     .Command(
         "phones",
         "Browse CUCM phones and update line appearance labels through AXL.",
+        ModuleCommandState.Implemented,
         PhonesAsync,
         ModuleResponseKind.Table)
     .Command(
         "dn",
         "List, inspect, and create CUCM directory numbers through AXL.",
+        ModuleCommandState.Implemented,
         DirectoryNumbersAsync,
         ModuleResponseKind.Table)
     .Command(
         "dids",
         "Manage the local approved inventory of user DNs.",
+        ModuleCommandState.Implemented,
         UserDidsAsync,
         ModuleResponseKind.Table)
     .Command(
         "number",
         "Alias for the CUCM directory-number command.",
+        ModuleCommandState.Implemented,
         DirectoryNumbersAsync,
         ModuleResponseKind.Table)
     .Command(
         "provision",
         "Provision a CUCM phone from scratch for a user (create/claim, assign DN, review, save).",
+        ModuleCommandState.Implemented,
         ProvisionAsync,
         ModuleResponseKind.Table)
     .Command(
         "get",
         "Query and export CUCM data (e.g. phones by device pool) to the console or a file.",
+        ModuleCommandState.Implemented,
         GetAsync,
         ModuleResponseKind.Table)
     .Command(
         "templates",
         "Create, review, and delete local line templates used by 'Apply template' and the classroom flow.",
+        ModuleCommandState.Implemented,
         TemplatesAsync,
         ModuleResponseKind.Table)
     .RunAsync(args);
 
-static async ValueTask<int> RootAsync(ModuleContext context)
+static ValueTask<ModuleCommandOutcome> RootAsync(ModuleContext context)
 {
     var publisher = context.Configuration.GetValueOrDefault("publisher");
-    await context.RespondAsync(new ModuleTableResponse(
-        string.IsNullOrWhiteSpace(publisher) ? "CUCM" : $"CUCM — {publisher}",
-        ["AREA", "DESCRIPTION"],
-        [
-            new ModuleTableRow(
-                "provision",
-                ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
-                ["provision"]),
-            new ModuleTableRow(
-                "phones",
-                ["Phones", "Browse CUCM phones, lines/DNs, room DNs, checks, and edits"],
-                ["phones", "list"]),
-            new ModuleTableRow(
-                "users",
-                ["Users", "Browse CUCM users and assign phones and DNs"],
-                ["users", "list"]),
-            new ModuleTableRow(
-                "dn",
-                ["Directory numbers", "List, inspect, and create CUCM directory numbers"],
-                ["dn", "list"]),
-            new ModuleTableRow(
-                "dids",
-                ["User DID inventory", "Manage the local approved inventory of user DNs"],
-                ["dids"]),
-            new ModuleTableRow(
-                "get",
-                ["Export CUCM data", "Query phones by device pool and export to console or a file"],
-                ["get"]),
-            new ModuleTableRow(
-                "templates",
-                ["Line templates", "Create and delete local line templates"],
-                ["templates"]),
-        ]));
-    return 0;
+    return ValueTask.FromResult<ModuleCommandOutcome>(
+        ModuleCommandResult.Render(new ModuleTableResponse(
+            string.IsNullOrWhiteSpace(publisher) ? "CUCM" : $"CUCM — {publisher}",
+            ["AREA", "DESCRIPTION"],
+            [
+                new ModuleTableRow(
+                    "provision",
+                    ["Provision a phone", "Create or claim a phone, assign a user and DN, from scratch"],
+                    ["provision"]),
+                new ModuleTableRow(
+                    "phones",
+                    ["Phones", "Browse CUCM phones, lines/DNs, room DNs, checks, and edits"],
+                    ["phones", "list"]),
+                new ModuleTableRow(
+                    "users",
+                    ["Users", "Browse CUCM users and assign phones and DNs"],
+                    ["users", "list"]),
+                new ModuleTableRow(
+                    "dn",
+                    ["Directory numbers", "List, inspect, and create CUCM directory numbers"],
+                    ["dn", "list"]),
+                new ModuleTableRow(
+                    "dids",
+                    ["User DID inventory", "Manage the local approved inventory of user DNs"],
+                    ["dids"]),
+                new ModuleTableRow(
+                    "get",
+                    ["Export CUCM data", "Query phones by device pool and export to console or a file"],
+                    ["get"]),
+                new ModuleTableRow(
+                    "templates",
+                    ["Line templates", "Create and delete local line templates"],
+                    ["templates"]),
+            ])));
 }
 
 // Composite wizard that chains the existing phone (add/edit) and user (assign) primitives into
 // a single guided flow: pick "new" or "existing" phone, select a user with an available local
 // DID, review, then create/claim the phone + assign the DID/line to that user in one submit.
-static async ValueTask<int> ProvisionAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> ProvisionAsync(ModuleContext context)
 {
     try
     {
         using var cucm = await CreateCucmAsync(context);
         if (context.Arguments.Count == 0)
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Provision a phone",
                 ["OPTION", "DETAIL"],
                 [
@@ -174,76 +182,69 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                         ["Existing phone", "Claim an unowned CUCM phone"],
                         ["provision", "existing"]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["new"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Provision a new phone",
                 "Phone name",
                 ["provision", "new-description"]));
-            return 0;
         }
         if (context.Arguments is ["new-description", var newName] &&
             !string.IsNullOrWhiteSpace(newName))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Provision {newName}",
                 "Description",
                 ["provision", "new-product", newName],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is ["new-product", var productName, var productDescription])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Provision {productName}",
                 "Product (e.g. \"Cisco 8841\")",
                 ["provision", "new-device-pool", productName, productDescription]));
-            return 0;
         }
         if (context.Arguments is
             ["new-device-pool", var dpName, var dpDescription, var dpProduct] &&
             !string.IsNullOrWhiteSpace(dpProduct))
         {
-            await RespondWithProvisionNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateProvisionNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select device pool",
                 "new-template",
                 new ProvisionWizardState(true, dpName, Normalize(dpDescription), dpProduct),
                 "device-pool",
-                allowNone: false);
-            return 0;
+                allowNone: false));
         }
         if (TryParseProvisionWizardState(context.Arguments, "new-template", out var templateState))
         {
-            await RespondWithProvisionNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateProvisionNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select phone button template",
                 "new-security-profile",
                 templateState,
                 "phone-template",
-                allowNone: true);
-            return 0;
+                allowNone: true));
         }
         if (TryParseProvisionWizardState(context.Arguments, "new-security-profile", out var securityState))
         {
-            await RespondWithProvisionNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateProvisionNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select security profile",
                 "new-user",
                 securityState,
                 "security-profile",
-                allowNone: true);
-            return 0;
+                allowNone: true));
         }
         if (TryParseProvisionWizardState(context.Arguments, "new-user", out var userSelectionState))
         {
-            await RespondWithProvisionUserSelectorAsync(context, cucm, userSelectionState);
-            return 0;
+            return ModuleCommandResult.Render(
+                await CreateProvisionUserSelectorResponseAsync(context, cucm, userSelectionState));
         }
         if (context.Arguments is ["existing"])
         {
@@ -262,11 +263,10 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                     ],
                     ["provision", "existing-selected", phone.Name]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "CUCM phones",
                 ["NAME", "DESCRIPTION", "MODEL", "DEVICE POOL", "OWNER"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["existing-selected", var existingPhoneName])
         {
@@ -280,15 +280,15 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                 phone.PhoneTemplateName,
                 phone.SecurityProfileName,
                 PreviousOwnerUserName: Normalize(phone.OwnerUserName));
-            await RespondWithProvisionUserSelectorAsync(context, cucm, existingState);
-            return 0;
+            return ModuleCommandResult.Render(
+                await CreateProvisionUserSelectorResponseAsync(context, cucm, existingState));
         }
         if (TryParseProvisionWizardState(context.Arguments, "review", out var reviewState) &&
             !string.IsNullOrWhiteSpace(reviewState.UserId))
         {
             var reviewUser = await RequireUserAsync(cucm, reviewState.UserId, context.CancellationToken);
             var reviewDid = await RequireAvailableUserDidForUserAsync(context, reviewUser);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review phone provisioning",
                 ["PHONE", "MODE", "PRODUCT", "DEVICE POOL", "USER", "USER DN", "OWNER ACTION"],
                 [
@@ -313,7 +313,6 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments.Count == 12 && context.Arguments[0] == "create" &&
             bool.TryParse(context.Arguments[1], out var createIsNew))
@@ -464,7 +463,7 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
             }
             var composedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, createState.PhoneName, createState.Description, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Provisioned phone '{createState.PhoneName}' for user '{createUserId}' with DN " +
                 $"'{did.Pattern}'" + (string.IsNullOrWhiteSpace(phoneUuid) ? "." : $" ({phoneUuid}).") +
                 (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
@@ -472,23 +471,21 @@ static async ValueTask<int> ProvisionAsync(ModuleContext context)
                 (createWarnings.Count == 0
                     ? string.Empty
                     : " WARNING: " + string.Join(" ", createWarnings)));
-            return 0;
         }
 
-        context.Error.WriteLine(
+        return ModuleCommandResult.Fail(
             "Usage: vt cucm provision\n" +
             "       vt cucm provision new\n" +
-            "       vt cucm provision existing");
-        return 2;
+            "       vt cucm provision existing",
+            exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
-static async Task RespondWithProvisionNamedSelectorAsync(
+static async Task<ModuleResponse> CreateProvisionNamedSelectorResponseAsync(
     ModuleContext context,
     CucmService cucm,
     string title,
@@ -526,14 +523,14 @@ static async Task RespondWithProvisionNamedSelectorAsync(
             [Clean(resource.Name), Clean(resource.Description)],
             ProvisionWizardArguments(nextRoute, SetProvisionWizardResource(state, resourceType, resource.Name))));
     }
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         title,
         ["NAME", "DESCRIPTION"],
         rows,
-        SubmitMode: ModuleTableSubmitMode.Save));
+        SubmitMode: ModuleTableSubmitMode.Save);
 }
 
-static async Task RespondWithProvisionUserSelectorAsync(
+static async Task<ModuleResponse> CreateProvisionUserSelectorResponseAsync(
     ModuleContext context,
     CucmService cucm,
     ProvisionWizardState state)
@@ -555,10 +552,10 @@ static async Task RespondWithProvisionUserSelectorAsync(
                 ? ProvisionWizardArguments("review", state with { UserId = user.UserId })
                 : null));
     }
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         $"Select a user for {state.PhoneName}",
         ["USER ID", "DISPLAY NAME", "USER DN", "STATUS"],
-        rows));
+        rows);
 }
 
 static ProvisionWizardState SetProvisionWizardResource(
@@ -621,14 +618,14 @@ static string DevicePoolLabel(string pool) =>
 // Query/export command: `vt cucm get phones` pulls CUCM phones (optionally filtered by
 // device pool via the CucmService.CountPhonesByDevicePoolAsync/ListPhonesAsync(devicePoolName:)
 // surface) and either displays them or writes a CSV for downstream routing-pattern analysis.
-static async ValueTask<int> GetAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> GetAsync(ModuleContext context)
 {
     try
     {
         using var cucm = await CreateCucmAsync(context);
         if (context.Arguments.Count == 0)
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Query CUCM data",
                 ["RESOURCE", "DESCRIPTION"],
                 [
@@ -637,7 +634,6 @@ static async ValueTask<int> GetAsync(ModuleContext context)
                         ["Phones", "Pull phones, optionally filtered by device pool"],
                         ["get", "phones"]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["phones"])
         {
@@ -660,17 +656,16 @@ static async ValueTask<int> GetAsync(ModuleContext context)
                     [Clean(pool.Name), Clean(pool.Description)],
                     ["get", "phones-output", pool.Name]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Select device pool",
                 ["NAME", "DESCRIPTION"],
                 rows,
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["phones-output", var outputPool] &&
             !string.IsNullOrWhiteSpace(outputPool))
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Export target for {DevicePoolLabel(outputPool)}",
                 ["OPTION", "DETAIL"],
                 [
@@ -684,44 +679,38 @@ static async ValueTask<int> GetAsync(ModuleContext context)
                         ["get", "phones-file", outputPool]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["phones-file", var filePool] &&
             !string.IsNullOrWhiteSpace(filePool))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Export {DevicePoolLabel(filePool)} phones",
                 "Output CSV file path",
                 ["get", "phones-run", filePool, "file"]));
-            return 0;
         }
         if (context.Arguments is ["phones-run", var runPool, "console"])
         {
             var records = await PullPhoneExportRecordsAsync(context, cucm, runPool);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"CUCM phones: {DevicePoolLabel(runPool)}",
                 PhoneExportColumns(),
                 records.Select(ToPhoneExportRow).ToArray()));
-            return 0;
         }
         if (context.Arguments is ["phones-run", var fileRunPool, "file", var filePath] &&
             !string.IsNullOrWhiteSpace(filePath))
         {
             var records = await PullPhoneExportRecordsAsync(context, cucm, fileRunPool);
             await WritePhoneExportCsvAsync(filePath, records, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Wrote {records.Count} CUCM phone(s) for {DevicePoolLabel(fileRunPool)} to " +
                 $"'{filePath}'.");
-            return 0;
         }
 
-        context.Error.WriteLine("Usage: vt cucm get phones");
-        return 2;
+        return ModuleCommandResult.Fail("Usage: vt cucm get phones", exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
@@ -843,7 +832,7 @@ static string CsvField(string? value)
 // LineTemplateStore). Templates defined via the 'line-templates' configuration setting are listed
 // for visibility but aren't editable/deletable here, since that setting is operator-controlled
 // outside the running module.
-static async ValueTask<int> TemplatesAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> TemplatesAsync(ModuleContext context)
 {
     try
     {
@@ -875,11 +864,10 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     ]));
             }
             rows.Add(new ModuleTableRow("add", ["<Add template>", string.Empty, string.Empty], ["templates", "add"]));
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Line templates",
                 ["NAME", "KIND", "SOURCE"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["select", var selectName])
         {
@@ -887,7 +875,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
             var template = stored.TryGetValue(selectName, out var found)
                 ? found
                 : throw new InvalidOperationException($"Local line template '{selectName}' was not found.");
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Line template: {selectName}",
                 ["FIELD", "VALUE"],
                 [
@@ -913,7 +901,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                         ["Delete", "Remove this local template"],
                         ["templates", "delete-review", selectName]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["delete-review", var deleteReviewName])
         {
@@ -921,7 +908,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
             {
                 throw new InvalidOperationException($"Local line template '{deleteReviewName}' was not found.");
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Confirm delete",
                 ["TEMPLATE", "ACTION"],
                 [
@@ -931,27 +918,24 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                         ["templates", "delete", deleteReviewName]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["delete", var deleteName])
         {
             var deleted = await store.DeleteAsync(deleteName, context.CancellationToken);
-            context.Output.WriteLine(deleted
+            return ModuleCommandResult.Ok(deleted
                 ? $"Deleted local line template '{deleteName}'."
                 : $"Local line template '{deleteName}' was not found.");
-            return 0;
         }
         if (context.Arguments is ["add"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Add line template",
                 "Template name",
                 ["templates", "add-kind"]));
-            return 0;
         }
         if (context.Arguments is ["add-kind", var addName] && !string.IsNullOrWhiteSpace(addName))
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Kind for template '{addName}'",
                 ["KIND", "DETAIL"],
                 [
@@ -964,7 +948,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                         ["User", "Owner-associated line"],
                         ["templates", "add-partition", addName, "user"]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["add-partition", var partitionTemplateName, var partitionKind])
         {
@@ -987,21 +970,19 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     [Clean(partition.Name), Clean(partition.Description)],
                     ["templates", "add-dn", partitionTemplateName, partitionKind, partition.Name]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Route partition for '{partitionTemplateName}'",
                 ["NAME", "DESCRIPTION"],
                 rows,
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["add-dn", var dnTemplateName, var dnKind, var dnPartitionRaw])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Directory number for '{dnTemplateName}'",
                 "Preset 4-digit DN (leave blank to use whatever DN is assigned/created at apply time)",
                 ["templates", "add-alerting-name", dnTemplateName, dnKind, dnPartitionRaw],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1014,7 +995,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
             {
                 throw new InvalidOperationException($"'{alertingNameDnRaw}' is not a valid 4-digit DN.");
             }
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Alerting name for '{alertingNameTemplateName}'",
                 "Alerting name (tokens: {room} {building} {pattern} {phoneName} {lineIndex} " +
                     "{devicePoolName} {userDisplayName} {userId})",
@@ -1023,7 +1004,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     alertingNamePartitionRaw, alertingNameDnRaw,
                 ],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1031,7 +1011,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                 var displayDnRaw, var displayAlertingNameRaw,
             ])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Caller ID (display) for '{displayTemplateName}'",
                 "Caller ID display",
                 [
@@ -1039,7 +1019,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     displayAlertingNameRaw,
                 ],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1047,7 +1026,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                 var labelAlertingNameRaw, var labelDisplayRaw,
             ])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Label for '{labelTemplateName}'",
                 "Line text label",
                 [
@@ -1055,7 +1034,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     labelAlertingNameRaw, labelDisplayRaw,
                 ],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1063,7 +1041,7 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                 var maskAlertingNameRaw, var maskDisplayRaw, var maskLabelRaw,
             ])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"External phone number mask for '{maskTemplateName}'",
                 "External phone number mask (e.g. 555XXXX)",
                 [
@@ -1071,7 +1049,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                     maskAlertingNameRaw, maskDisplayRaw, maskLabelRaw,
                 ],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1107,12 +1084,11 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                         voicemailMaskRaw, profile.Name,
                     ]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Voicemail profile for '{voicemailTemplateName}'",
                 ["NAME", "DESCRIPTION"],
                 voicemailRows,
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1123,13 +1099,12 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
         {
             if (associateKind != "user")
             {
-                await RespondWithTemplateReviewAsync(
-                    context, associateTemplateName, associateKind, associatePartitionRaw, associateDnRaw,
-                    associateAlertingNameRaw, associateDisplayRaw, associateLabelRaw, associateMaskRaw,
-                    associateVoicemailRaw, associateEndUserRaw: "false");
-                return 0;
+                return ModuleCommandResult.Render(CreateTemplateReviewResponse(
+                    associateTemplateName, associateKind, associatePartitionRaw, associateDnRaw,
+                    associateAlertingNameRaw, associateDisplayRaw, associateLabelRaw,
+                    associateMaskRaw, associateVoicemailRaw, associateEndUserRaw: "false"));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Associate owner for '{associateTemplateName}'",
                 ["OPTION", "DETAIL"],
                 [
@@ -1150,7 +1125,6 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                             associateMaskRaw, associateVoicemailRaw, "false",
                         ]),
                 ]));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -1159,10 +1133,9 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                 var reviewVoicemailRaw, var reviewAssociateRaw,
             ])
         {
-            await RespondWithTemplateReviewAsync(
-                context, reviewTemplateName, reviewKind, reviewPartitionRaw, reviewDnRaw, reviewAlertingNameRaw,
-                reviewDisplayRaw, reviewLabelRaw, reviewMaskRaw, reviewVoicemailRaw, reviewAssociateRaw);
-            return 0;
+            return ModuleCommandResult.Render(CreateTemplateReviewResponse(
+                reviewTemplateName, reviewKind, reviewPartitionRaw, reviewDnRaw, reviewAlertingNameRaw,
+                reviewDisplayRaw, reviewLabelRaw, reviewMaskRaw, reviewVoicemailRaw, reviewAssociateRaw));
         }
         if (context.Arguments is
             [
@@ -1182,22 +1155,20 @@ static async ValueTask<int> TemplatesAsync(ModuleContext context)
                 Normalize(saveVoicemailRaw),
                 Normalize(saveDnRaw));
             await store.SaveAsync(saveTemplateName, template, context.CancellationToken);
-            context.Output.WriteLine($"Saved local line template '{saveTemplateName}'.");
-            return 0;
+            return ModuleCommandResult.Ok($"Saved local line template '{saveTemplateName}'.");
         }
 
-        context.Error.WriteLine("Usage: vt cucm templates [add|select <name>|delete <name>]");
-        return 2;
+        return ModuleCommandResult.Fail(
+            "Usage: vt cucm templates [add|select <name>|delete <name>]",
+            exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
-static ValueTask RespondWithTemplateReviewAsync(
-    ModuleContext context,
+static ModuleResponse CreateTemplateReviewResponse(
     string templateName,
     string kind,
     string partitionRaw,
@@ -1208,7 +1179,7 @@ static ValueTask RespondWithTemplateReviewAsync(
     string maskRaw,
     string voicemailRaw,
     string associateEndUserRaw) =>
-    context.RespondAsync(new ModuleTableResponse(
+    new ModuleTableResponse(
         $"Review template '{templateName}'",
         [
             "NAME", "KIND", "PARTITION", "DN", "ALERTING NAME", "CALLER ID", "LABEL", "EXTERNAL MASK",
@@ -1234,9 +1205,9 @@ static ValueTask RespondWithTemplateReviewAsync(
                     labelRaw, maskRaw, voicemailRaw, associateEndUserRaw,
                 ]),
         ],
-        SubmitMode: ModuleTableSubmitMode.Save));
+            SubmitMode: ModuleTableSubmitMode.Save);
 
-static async ValueTask<int> UsersAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> UsersAsync(ModuleContext context)
 {
     try
     {
@@ -1268,11 +1239,10 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                         ? null
                         : ["users", "select", user.UserId]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "CUCM users",
                 ["USER ID", "DISPLAY NAME", "EMAIL", "LDAP PHONE", "USER DN", "DN STATUS", "DEVICES"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["select", var userId])
         {
@@ -1302,11 +1272,10 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                     ["Browse", "All CUCM phones"],
                     ["phones", "list"]))
                 .ToArray();
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"CUCM user: {user.UserId ?? userId}",
                 ["ACTION", "DETAIL"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["phones", var phoneUserId])
         {
@@ -1335,23 +1304,21 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                     ],
                     ["users", "phone", phoneUserId, phoneName]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a phone for {user.DisplayName ?? phoneUserId} ({did.Pattern})",
                 ["PHONE", "DESCRIPTION", "OWNER", "STATUS"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["phone", var slotUserId, var slotPhoneName])
         {
             var user = await RequireUserAsync(cucm, slotUserId, context.CancellationToken);
             _ = await RequireAvailableUserDidForUserAsync(context, user);
             _ = await RequirePhoneAsync(cucm, slotPhoneName, context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Assign {UserDidStore.NormalizeUserExtension(user.TelephoneNumber)} to {slotPhoneName}",
                 "Line slot index",
                 ["users", "review", slotUserId, slotPhoneName],
                 "1"));
-            return 0;
         }
         if (context.Arguments is
             ["review", var reviewUserId, var reviewPhoneName, var reviewSlotText] &&
@@ -1370,7 +1337,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
             var alreadyAssociated = user.AssociatedDevices.Contains(
                 reviewPhoneName,
                 StringComparer.OrdinalIgnoreCase);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review user phone assignment",
                 ["USER", "USER DN", "PARTITION", "PHONE", "SLOT", "CURRENT", "ASSOCIATION", "DN ACTION", "OWNER ACTION"],
                 [
@@ -1394,7 +1361,6 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             ["assign", var assignmentUserId, var assignmentPhoneName, var assignmentSlotText,
@@ -1517,7 +1483,7 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
             }
             var assignmentComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, assignmentPhoneName, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Assigned phone '{assignmentPhoneName}' and DN '{did.Pattern}' " +
                 $"to CUCM user '{assignmentUserId}'." +
                 (replacingOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
@@ -1525,17 +1491,15 @@ static async ValueTask<int> UsersAsync(ModuleContext context)
                 (assignmentWarnings.Count == 0
                     ? string.Empty
                     : " WARNING: " + string.Join(" ", assignmentWarnings)));
-            return 0;
         }
 
-        context.Error.WriteLine(
-            "Usage: vt cucm users list [--max <count>] [--page-size <count>]");
-        return 2;
+        return ModuleCommandResult.Fail(
+            "Usage: vt cucm users list [--max <count>] [--page-size <count>]",
+            exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
@@ -1687,7 +1651,7 @@ static async Task EnsureRoomLineAsync(
 // DID source exists.
 static string RoomDidPlaceholderPattern() => "89898989";
 
-static async ValueTask<int> PhonesAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
 {
     try
     {
@@ -1746,16 +1710,15 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 "add",
                 ["<Add phone>", "Create a new, unregistered CUCM phone shell from scratch", "", "", ""],
                 ["phones", "add"]));
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "CUCM phones",
                 ["NAME", "DESCRIPTION", "MODEL", "PROTOCOL", "OWNER"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["select", var phoneName])
         {
             var phone = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"CUCM phone: {phone.Name ?? phoneName}",
                 ["ACTION", "DETAIL"],
                 [
@@ -1783,7 +1746,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["Edit", "Update description, device pool, and owner"],
                         ["phones", "edit", phoneName]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["assign-slot", var phoneNameForSlot])
         {
@@ -1811,19 +1773,17 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 "slot-custom",
                 ["Custom", "Enter a specific line index", string.Empty, string.Empty],
                 ["phones", "assign-slot-custom", phoneNameForSlot]));
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Assign user DN on {phoneForSlotList.Name ?? phoneNameForSlot}",
                 ["INDEX", "CURRENT NUMBER", "PARTITION", "LABEL"],
                 slotRows));
-            return 0;
         }
         if (context.Arguments is ["assign-slot-custom", var phoneNameForSlotCustom])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Assign user DID on {phoneNameForSlotCustom}",
                 "Line slot index",
                 ["phones", "slot", phoneNameForSlotCustom]));
-            return 0;
         }
         if (context.Arguments is ["slot", var phoneNameForSlotSelection, var slotIndexText] &&
             int.TryParse(slotIndexText, out var slotIndex) && slotIndex > 0)
@@ -1832,24 +1792,23 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 cucm,
                 phoneNameForSlotSelection,
                 context.CancellationToken);
-            if (!phoneForSlotSelection.Lines.Any(line => line.Index == slotIndex))
-            {
-                context.Output.WriteLine(
+            var note = phoneForSlotSelection.Lines.Any(line => line.Index == slotIndex)
+                ? null
+                :
                     $"Note: line {slotIndex} doesn't exist yet on {phoneNameForSlotSelection}. CUCM " +
                     "only accepts a new line at a position defined as a Line-type button in the " +
                     $"phone's button template ('{Clean(phoneForSlotSelection.PhoneTemplateName)}'). " +
                     "If the assignment below fails, change the phone's button template via " +
-                    "'phones edit' to one with more line positions, then retry.");
-            }
-            await RespondWithAvailableUserDidsAsync(
+                    "'phones edit' to one with more line positions, then retry.";
+            return ModuleCommandResult.Render(await CreateAvailableUserDidsResponseAsync(
                 context,
                 phoneNameForSlotSelection,
-                slotIndex);
-            return 0;
+                slotIndex,
+                note));
         }
         if (context.Arguments is ["check", var phoneNameForChecks])
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Configuration checks for {phoneNameForChecks}",
                 ["PROFILE", "DETAIL"],
                 [
@@ -1866,7 +1825,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["Room routing", "Validate the room line's partition against its building"],
                         ["phones", "check", phoneNameForChecks, "room-routing"]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["check", var phoneNameToCheck, var profileName] &&
             PhoneConfigurationChecks.TryParseProfile(profileName, out var profile))
@@ -1898,7 +1856,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     roomPartitions);
             }
             await context.ReportProgressAsync("Phone configuration check complete", 3, 3);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"{FormatProfile(profile)} check: {phone.Name ?? phoneNameToCheck}",
                 ["CHECK", "EXPECTED", "ACTUAL", "RESULT", "DETAIL"],
                 results.Select((result, index) => new ModuleTableRow(
@@ -1912,7 +1870,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     ])).ToArray(),
                 Selectable: false,
                 Searchable: false));
-            return 0;
         }
         if (context.Arguments is ["lines", var phoneNameForLines])
         {
@@ -1935,11 +1892,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 $"{phoneNameForLines}:add",
                 [nextLineIndex.ToString(), "<Add new line>", string.Empty, string.Empty, string.Empty],
                 ["phones", "line", phoneNameForLines, nextLineIndex.ToString()]));
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Numbers on {phone.Name ?? phoneNameForLines}",
                 ["INDEX", "NUMBER", "PARTITION", "LABEL", "DISPLAY"],
                 rows));
-            return 0;
         }
         if (context.Arguments is ["line", var phoneNameForLine, var indexText] &&
             int.TryParse(indexText, out var lineIndex) && lineIndex > 0)
@@ -1983,11 +1939,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     ["Remove directory number", $"Clear {line.Pattern}"],
                     ["phones", "remove-line-review", phoneNameForLine, lineIndex.ToString()]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"{line?.Pattern ?? $"Line {lineIndex} (new)"} on {phoneNameForLine}",
                 ["ACTION", "CURRENT VALUE"],
                 lineRows));
-            return 0;
         }
         if (context.Arguments is ["dn-options", var phoneNameForDnOptions, var dnOptionsIndexText] &&
             int.TryParse(dnOptionsIndexText, out var dnOptionsIndex) && dnOptionsIndex > 0)
@@ -2031,7 +1986,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     ["Owner (associated end user)", Clean(dnOptionsPhone.OwnerUserName)],
                     ["phones", "dn-owner", phoneNameForDnOptions, dnOptionsIndex.ToString()]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+                    return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"DN options: {dnOptionsLine?.Pattern ?? $"line {dnOptionsIndex} (new)"} on " +
                     $"{phoneNameForDnOptions}",
                 ["FIELD", "CURRENT VALUE"],
@@ -2043,19 +1998,17 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         "Apply template",
                         ["phones", "apply-template", phoneNameForDnOptions, dnOptionsIndex.ToString()]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["dn", var phoneNameForDnPrompt, var dnIndexText] &&
             int.TryParse(dnIndexText, out var dnIndex) && dnIndex > 0)
         {
             var dnPhone = await RequirePhoneAsync(cucm, phoneNameForDnPrompt, context.CancellationToken);
             var line = dnPhone.Lines.FirstOrDefault(candidate => candidate.Index == dnIndex);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set directory number for line {dnIndex} on {phoneNameForDnPrompt}",
                 "Directory number",
                 ["phones", "set-dn-partition", phoneNameForDnPrompt, dnIndex.ToString()],
                 line?.Pattern));
-            return 0;
         }
         if (context.Arguments is
             ["set-dn-partition", var dnPartitionPhoneName, var dnPartitionIndexText, var dnPartitionPattern] &&
@@ -2066,19 +2019,18 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 cucm, dnPartitionPhoneName, context.CancellationToken);
             var dnPartitionLine = dnPartitionPhone.Lines.FirstOrDefault(
                 candidate => candidate.Index == dnPartitionIndex);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Route partition for {dnPartitionPattern} on line {dnPartitionIndex}",
                 "Route partition (leave blank for none)",
                 ["phones", "set-dn", dnPartitionPhoneName, dnPartitionIndex.ToString(), dnPartitionPattern],
                 dnPartitionLine?.RoutePartitionName,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is ["dids", var phoneNameForDids, var didIndexText] &&
             int.TryParse(didIndexText, out var didIndex) && didIndex > 0)
         {
-            await RespondWithAvailableUserDidsAsync(context, phoneNameForDids, didIndex);
-            return 0;
+            return ModuleCommandResult.Render(
+                await CreateAvailableUserDidsResponseAsync(context, phoneNameForDids, didIndex));
         }
         if (context.Arguments is
             ["did-review", var phoneNameForDidReview, var reviewIndexText, var reviewPattern, var reviewPartition] &&
@@ -2099,7 +2051,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             EnsureUserDidCanBeAssigned(did, existing);
             var reviewResolvedPartition = existing?.RoutePartitionName ?? did.RoutePartitionName;
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review user DN assignment",
                 ["PHONE", "SLOT", "CURRENT", "USER DN", "PARTITION", "DN ACTION", "OWNER"],
                 [
@@ -2121,7 +2073,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             ["assign-did", var phoneNameForDidAssignment, var assignmentIndexText,
@@ -2182,11 +2133,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             var didComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, phoneNameForDidAssignment, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Assigned user DN '{did.Pattern}' to line {assignmentIndex} on {phoneNameForDidAssignment}" +
                 (existing is null ? " after creating the DN in CUCM." : ".") +
                 $" Description: '{didComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is
             ["set-dn", var phoneNameForDnUpdate, var dnUpdateIndexText, var newDn, var newDnPartitionRaw] &&
@@ -2217,17 +2167,16 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             }
             var dnUpdateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, phoneNameForDnUpdate, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated line {dnUpdateIndex} on {phoneNameForDnUpdate} to directory number '{newDn}'. " +
                 $"Description: '{dnUpdateComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is ["room-building", var phoneNameForRoomBuilding, var roomLineIndexText] &&
             int.TryParse(roomLineIndexText, out var roomBuildingLineIndex) && roomBuildingLineIndex > 0)
         {
             _ = await RequirePhoneAsync(cucm, phoneNameForRoomBuilding, context.CancellationToken);
             var buildingPatterns = RequireBuildingPatterns(context);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a building for line {roomBuildingLineIndex} on {phoneNameForRoomBuilding}",
                 ["BUILDING", "PARTITION", "DEVICE POOLS"],
                 buildingPatterns
@@ -2246,20 +2195,18 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                             roomBuildingLineIndex.ToString(), pair.Key,
                         ]))
                     .ToArray()));
-            return 0;
         }
         if (context.Arguments is
             ["room-number", var phoneNameForRoomNumber, var roomNumberLineIndexText, var roomBuildingCode] &&
             int.TryParse(roomNumberLineIndexText, out var roomNumberLineIndex) && roomNumberLineIndex > 0)
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Room number for building {roomBuildingCode}",
                 "Room number (3 digits)",
                 [
                     "phones", "room-review", phoneNameForRoomNumber,
                     roomNumberLineIndex.ToString(), roomBuildingCode,
                 ]));
-            return 0;
         }
         if (context.Arguments is
             ["room-review", var phoneNameForRoomReview, var roomReviewLineIndexText,
@@ -2280,7 +2227,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 buildingPattern.RoutePartitionName,
                 context.CancellationToken);
             EnsureRoomDidCanBeAssigned(roomNumber, buildingPattern.RoutePartitionName, existing);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review room DN assignment",
                 ["PHONE", "SLOT", "CURRENT", "ROOM DN", "BUILDING", "PARTITION", "DN ACTION"],
                 [
@@ -2301,7 +2248,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             ["assign-room", var phoneNameForRoomAssignment, var roomAssignLineIndexText,
@@ -2337,18 +2283,17 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             var roomAssignComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, phoneNameForRoomAssignment, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Assigned room DN '{roomAssignNumber}' (building {roomAssignBuildingCode}) to line " +
                 $"{roomAssignLineIndex} on {phoneNameForRoomAssignment}" +
                 (existing is null ? " after creating the DN in CUCM." : ".") +
                 $" Description: '{roomAssignComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is ["classroom", var classroomPhoneName])
         {
             _ = await RequirePhoneAsync(cucm, classroomPhoneName, context.CancellationToken);
             var buildingPatterns = RequireBuildingPatterns(context);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a building for {classroomPhoneName}",
                 ["BUILDING", "PARTITION", "DEVICE POOLS"],
                 buildingPatterns
@@ -2364,15 +2309,13 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ],
                         ["phones", "classroom-room", classroomPhoneName, pair.Key]))
                     .ToArray()));
-            return 0;
         }
         if (context.Arguments is ["classroom-room", var classroomRoomPhoneName, var classroomBuildingCode])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Room number for building {classroomBuildingCode}",
                 "Room number (3 digits)",
                 ["phones", "classroom-user", classroomRoomPhoneName, classroomBuildingCode]));
-            return 0;
         }
         if (context.Arguments is
             ["classroom-user", var classroomUserPhoneName, var classroomUserBuildingCode, var classroomRoomNumber])
@@ -2410,11 +2353,10 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                           ]
                         : null));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a user for {classroomUserPhoneName}",
                 ["USER ID", "DISPLAY NAME", "USER DN", "STATUS"],
                 classroomUserRows));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -2445,7 +2387,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 classroomReviewRoomNumber,
                 buildingPattern.RoutePartitionName,
                 existingRoomDn);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Review classroom template for {classroomReviewPhoneName}",
                 ["FIELD", "VALUE"],
                 [
@@ -2475,7 +2417,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -2576,14 +2517,13 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
                 did.Pattern, did.RoutePartitionName, classroomApplyPhoneName, 1, classroomApplyUserId,
                 effectiveUserPartition, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Applied classroom template to {classroomApplyPhoneName}: device pool '{devicePoolName}', " +
                 $"room DN '{classroomApplyRoomNumber}', user '{classroomApplyUserId}' ({did.Pattern}). " +
                 $"Description: '{classroomComposedDescription}'." +
                 (classroomWarnings.Count == 0
                     ? string.Empty
                     : " WARNING: " + string.Join(" ", classroomWarnings)));
-            return 0;
         }
         if (context.Arguments is
             ["remove-line-review", var phoneNameForRemoveReview, var removeReviewIndexText] &&
@@ -2596,7 +2536,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 throw new InvalidOperationException(
                     $"Line {removeReviewIndex} on {phoneNameForRemoveReview} has no directory number to remove.");
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review directory number removal",
                 ["PHONE", "SLOT", "NUMBER", "PARTITION", "ACTION"],
                 [
@@ -2612,7 +2552,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ["phones", "remove-line", phoneNameForRemoveReview, removeReviewIndex.ToString()]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["remove-line", var phoneNameForRemove, var removeIndexText] &&
             int.TryParse(removeIndexText, out var removeIndex) && removeIndex > 0)
@@ -2627,13 +2566,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             var removeComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, phoneNameForRemove, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Removed directory number '{removedPattern}' from line {removeIndex} on {phoneNameForRemove}." +
                 (clearedLocalRecord
                     ? " Cleared the matching local user DN inventory assignment."
                     : string.Empty) +
                 $" Description: '{removeComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is ["apply-template", var phoneNameForTemplateList, var templateListIndexText] &&
             int.TryParse(templateListIndexText, out var templateListIndex) && templateListIndex > 0)
@@ -2646,7 +2584,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     "No line templates are defined. Create one via 'vt cucm templates add' before " +
                     "applying one.");
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Apply template to line {templateListIndex} on {phoneNameForTemplateList}",
                 ["TEMPLATE", "KIND", "ASSOCIATES OWNER"],
                 templates
@@ -2665,7 +2603,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                             templateListIndex.ToString(), pair.Key,
                         ]))
                     .ToArray()));
-            return 0;
         }
         if (context.Arguments is
             ["apply-template-context", var contextPhoneName, var contextIndexText, var contextTemplateName] &&
@@ -2680,7 +2617,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     buildingPatterns, phone.PhoneTemplateName);
                 if (resolvedBuilding is not null)
                 {
-                    await context.RespondAsync(new ModuleTextPromptResponse(
+                    return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                         $"Room number for building {resolvedBuilding} (from button template " +
                             $"'{phone.PhoneTemplateName}')",
                         "Room number (3 digits)",
@@ -2688,9 +2625,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                             "phones", "apply-template-room-review", contextPhoneName,
                             contextIndex.ToString(), contextTemplateName, resolvedBuilding,
                         ]));
-                    return 0;
                 }
-                await context.RespondAsync(new ModuleTableResponse(
+                return ModuleCommandResult.Render(new ModuleTableResponse(
                     $"Could not determine a building from button template " +
                         $"'{Clean(phone.PhoneTemplateName)}' — select one",
                     ["BUILDING", "PARTITION", "DEVICE POOLS"],
@@ -2710,18 +2646,16 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                                 contextIndex.ToString(), contextTemplateName, pair.Key,
                             ]))
                         .ToArray()));
-                return 0;
             }
             if (!string.IsNullOrWhiteSpace(template.Pattern))
             {
                 if (!string.IsNullOrWhiteSpace(template.RoutePartitionName))
                 {
-                    await RespondWithLineTemplateOwnerOrReviewAsync(
+                    return ModuleCommandResult.Render(await CreateLineTemplateOwnerOrReviewResponseAsync(
                         context, cucm, template, contextTemplateName, contextPhoneName, contextIndex,
-                        template.Pattern, template.RoutePartitionName);
-                    return 0;
+                        template.Pattern, template.RoutePartitionName));
                 }
-                await context.RespondAsync(new ModuleTextPromptResponse(
+                return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                     $"Route partition for {template.Pattern}",
                     "Route partition (leave blank for none)",
                     [
@@ -2729,14 +2663,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         contextIndex.ToString(), contextTemplateName, template.Pattern,
                     ],
                     AllowEmpty: true));
-                return 0;
             }
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Apply template '{contextTemplateName}' to line {contextIndex} on {contextPhoneName}",
                 "Directory number pattern",
                 ["phones", "apply-template-user-partition", contextPhoneName, contextIndex.ToString(),
                     contextTemplateName]));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -2745,14 +2677,13 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             ] &&
             int.TryParse(roomNumberIndexText, out var roomNumberTemplateIndex) && roomNumberTemplateIndex > 0)
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Room number for building {roomNumberBuildingCode}",
                 "Room number (3 digits)",
                 [
                     "phones", "apply-template-room-review", roomNumberPhoneName,
                     roomNumberTemplateIndex.ToString(), roomNumberTemplateName, roomNumberBuildingCode,
                 ]));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -2771,7 +2702,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             var template = await RequireLineTemplateAsync(context, roomReviewTemplateName);
             var buildingPatterns = RequireBuildingPatterns(context);
             var buildingPattern = RequireBuildingPattern(buildingPatterns, roomReviewTemplateBuildingCode);
-            await RespondWithLineTemplateReviewAsync(
+            return ModuleCommandResult.Render(await CreateLineTemplateReviewResponseAsync(
                 context,
                 cucm,
                 template,
@@ -2783,8 +2714,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 buildingPattern.RoutePartitionName,
                 ownerUserId: null,
                 room: roomReviewTemplateNumber,
-                building: roomReviewTemplateBuildingCode);
-            return 0;
+                building: roomReviewTemplateBuildingCode));
         }
         if (context.Arguments is
             [
@@ -2797,7 +2727,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             var template = await RequireLineTemplateAsync(context, userPartitionTemplateName);
             if (!string.IsNullOrWhiteSpace(template.RoutePartitionName))
             {
-                await RespondWithLineTemplateOwnerOrReviewAsync(
+                return ModuleCommandResult.Render(await CreateLineTemplateOwnerOrReviewResponseAsync(
                     context,
                     cucm,
                     template,
@@ -2805,10 +2735,9 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     userPartitionPhoneName,
                     userPartitionIndex,
                     userPartitionPattern,
-                    template.RoutePartitionName);
-                return 0;
+                    template.RoutePartitionName));
             }
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Route partition for {userPartitionPattern}",
                 "Route partition (leave blank for none)",
                 [
@@ -2816,7 +2745,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     userPartitionIndex.ToString(), userPartitionTemplateName, userPartitionPattern,
                 ],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -2828,7 +2756,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             userPartitionReviewIndex > 0)
         {
             var template = await RequireLineTemplateAsync(context, userPartitionReviewTemplateName);
-            await RespondWithLineTemplateOwnerOrReviewAsync(
+            return ModuleCommandResult.Render(await CreateLineTemplateOwnerOrReviewResponseAsync(
                 context,
                 cucm,
                 template,
@@ -2836,8 +2764,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 userPartitionReviewPhoneName,
                 userPartitionReviewIndex,
                 userPartitionReviewPattern,
-                Normalize(userPartitionReviewPartitionRaw));
-            return 0;
+                Normalize(userPartitionReviewPartitionRaw)));
         }
         if (context.Arguments is
             [
@@ -2849,7 +2776,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         {
             var phone = await RequirePhoneAsync(cucm, userOwnerReviewPhoneName, context.CancellationToken);
             var template = await RequireLineTemplateAsync(context, userOwnerReviewTemplateName);
-            await RespondWithLineTemplateReviewAsync(
+            return ModuleCommandResult.Render(await CreateLineTemplateReviewResponseAsync(
                 context,
                 cucm,
                 template,
@@ -2861,8 +2788,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 Normalize(userOwnerReviewPartitionRaw),
                 ownerUserId: Normalize(userOwnerReviewOwnerRaw),
                 room: null,
-                building: null);
-            return 0;
+                building: null));
         }
         if (context.Arguments is
             [
@@ -2960,13 +2886,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             }
             var applyComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, applyPhoneName, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Applied template to line {applyIndex} on {applyPhoneName}: DN '{applyPattern}' " +
                 $"({DisplayPartition(applyPartition)})" +
                 (existing is null ? " (created in CUCM)" : string.Empty) +
                 (applyOwnerUserId is null ? string.Empty : $", owner '{applyOwnerUserId}'") +
                 $". Description: '{applyComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is ["label", var phoneNameForPrompt, var labelIndexText] &&
             int.TryParse(labelIndexText, out var labelIndex) && labelIndex > 0)
@@ -2976,13 +2901,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phoneNameForPrompt,
                 labelIndex,
                 context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set label for {line.Pattern ?? $"line {labelIndex}"}",
                 "Label",
                 ["phones", "set-label", phoneNameForPrompt, labelIndex.ToString()],
                 line.Label,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is ["set-label", var phoneNameToUpdate, var updateIndexText, var newLabel] &&
             int.TryParse(updateIndexText, out var updateIndex) && updateIndex > 0)
@@ -2992,9 +2916,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 updateIndex,
                 newLabel,
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated line {updateIndex} on {phoneNameToUpdate} with label '{newLabel}'.");
-            return 0;
         }
         if (context.Arguments is ["caller-id", var phoneNameForCallerIdPrompt, var callerIdIndexText] &&
             int.TryParse(callerIdIndexText, out var callerIdIndex) && callerIdIndex > 0)
@@ -3004,13 +2927,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 phoneNameForCallerIdPrompt,
                 callerIdIndex,
                 context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set caller ID for {line.Pattern ?? $"line {callerIdIndex}"}",
                 "Caller ID (displayed on outbound calls)",
                 ["phones", "set-caller-id", phoneNameForCallerIdPrompt, callerIdIndex.ToString()],
                 line.Display,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             ["set-caller-id", var phoneNameForCallerIdUpdate, var callerIdUpdateIndexText, var newCallerId] &&
@@ -3022,10 +2944,9 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 newCallerId,
                 newCallerId,
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated line {callerIdUpdateIndex} on {phoneNameForCallerIdUpdate} with caller ID " +
                 $"'{newCallerId}'.");
-            return 0;
         }
         if (context.Arguments is
             ["alerting-name", var phoneNameForAlertingPrompt, var alertingIndexText] &&
@@ -3035,13 +2956,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 cucm, phoneNameForAlertingPrompt, alertingIndex, context.CancellationToken);
             var dn = await cucm.GetDirectoryNumberAsync(
                 line.Pattern!, line.RoutePartitionName, context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set alerting name for {line.Pattern ?? $"line {alertingIndex}"}",
                 "Alerting name (shown on the called party's phone)",
                 ["phones", "set-alerting-name", phoneNameForAlertingPrompt, alertingIndex.ToString()],
                 dn?.AlertingName,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             ["set-alerting-name", var phoneNameForAlertingUpdate, var alertingUpdateIndexText,
@@ -3056,9 +2976,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     line.RoutePartitionName,
                     AlertingName: newAlertingName),
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated {line.Pattern} with alerting name '{newAlertingName}'.");
-            return 0;
         }
         if (context.Arguments is
             ["external-mask", var phoneNameForMaskPrompt, var maskIndexText] &&
@@ -3066,13 +2985,12 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         {
             var line = await RequireLineAsync(
                 cucm, phoneNameForMaskPrompt, maskIndex, context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set external phone number mask for {line.Pattern ?? $"line {maskIndex}"}",
                 "External phone number mask (e.g. 555XXXX)",
                 ["phones", "set-external-mask", phoneNameForMaskPrompt, maskIndex.ToString()],
                 line.ExternalPhoneNumberMask,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             ["set-external-mask", var phoneNameForMaskUpdate, var maskUpdateIndexText, var newMask] &&
@@ -3083,24 +3001,22 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 maskUpdateIndex,
                 newMask,
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated line {maskUpdateIndex} on {phoneNameForMaskUpdate} with external phone " +
                 $"number mask '{newMask}'.");
-            return 0;
         }
         if (context.Arguments is
             ["dn-owner", var phoneNameForOwnerPrompt, var ownerIndexText] &&
             int.TryParse(ownerIndexText, out var ownerIndex) && ownerIndex > 0)
         {
             var phone = await RequirePhoneAsync(cucm, phoneNameForOwnerPrompt, context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Set owner for line {ownerIndex} on {phoneNameForOwnerPrompt}",
                 "Owner user ID (leave blank to clear... " +
                     "note: CUCM currently leaves an existing owner unchanged if left blank)",
                 ["phones", "dn-owner-review", phoneNameForOwnerPrompt, ownerIndex.ToString()],
                 phone.OwnerUserName,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             ["dn-owner-review", var phoneNameForOwnerReview, var ownerReviewIndexText, var ownerReviewUserId] &&
@@ -3113,7 +3029,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 // Validate early so a typo doesn't silently no-op the phone update below.
                 await RequireUserAsync(cucm, newOwnerId, context.CancellationToken);
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review owner change",
                 ["PHONE", "LINE", "CURRENT OWNER", "NEW OWNER", "ACTION"],
                 [
@@ -3134,7 +3050,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             ["set-dn-owner", var phoneNameForOwnerUpdate, var ownerUpdateIndexText, var ownerUpdateUserIdRaw] &&
@@ -3155,55 +3070,49 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             }
             var ownerComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, phoneNameForOwnerUpdate, null, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 (newOwnerId is null
                     ? $"Left the owner of {phoneNameForOwnerUpdate} unchanged."
                     : $"Set the owner of {phoneNameForOwnerUpdate} to '{newOwnerId}'.") +
                 $" Description: '{ownerComposedDescription}'.");
-            return 0;
         }
         if (context.Arguments is ["add"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Add CUCM Phone", 
                 "MAC address", 
                 ["phones", "add-mac"])); 
-            return 0;
         }
         if (context.Arguments is ["add-mac", var macRaw] && MACAddress.TryParse(macRaw, out var mac))
         {
             var macPhoneName = $"SEP{mac!.Value}";
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add phone {macPhoneName}",
                 "Description",
                 ["phones", "add-product", macPhoneName],
                 AllowEmpty: true));
-            return 0;
-
         }
         if (context.Arguments is ["add-description", var addName] &&
             !string.IsNullOrWhiteSpace(addName))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add phone {addName}",
                 "Description",
                 ["phones", "add-product", addName],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is ["add-product", var productPhoneName, var productDescription])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add phone {productPhoneName}",
                 "Product (e.g. \"Cisco 8841\")",
                 ["phones", "add-device-pool", productPhoneName, productDescription]));
-            return 0;
         }
         if (context.Arguments is
             ["add-device-pool", var devicePoolPhoneName, var devicePoolDescription, var devicePoolProduct] &&
             !string.IsNullOrWhiteSpace(devicePoolProduct))
         {
-            await RespondWithPhoneNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreatePhoneNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select device pool",
@@ -3213,44 +3122,40 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                     Normalize(devicePoolDescription),
                     devicePoolProduct),
                 "device-pool",
-                allowNone: false);
-            return 0;
+                allowNone: false));
         }
         if (TryParsePhoneWizardState(context.Arguments, "add-template", out var templateState))
         {
-            await RespondWithPhoneNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreatePhoneNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select phone button template",
                 "add-security-profile",
                 templateState,
                 "phone-template",
-                allowNone: true);
-            return 0;
+                allowNone: true));
         }
         if (TryParsePhoneWizardState(
             context.Arguments,
             "add-security-profile",
             out var securityProfileState))
         {
-            await RespondWithPhoneNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreatePhoneNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select security profile",
                 "add-owner",
                 securityProfileState,
                 "security-profile",
-                allowNone: true);
-            return 0;
+                allowNone: true));
         }
         if (TryParsePhoneWizardState(context.Arguments, "add-owner", out var ownerState))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add phone {ownerState.Name}",
                 "Owner user ID",
                 PhoneWizardArguments("add-review-value", ownerState),
                 AllowEmpty: true));
-            return 0;
         }
         if (TryParsePhoneWizardStateWithValue(
             context.Arguments,
@@ -3258,10 +3163,8 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
             out var reviewValueState,
             out var ownerValue))
         {
-            await RespondWithPhoneCreateReviewAsync(
-                context,
-                reviewValueState with { OwnerUserName = Normalize(ownerValue) });
-            return 0;
+            return ModuleCommandResult.Render(CreatePhoneReviewResponse(
+                reviewValueState with { OwnerUserName = Normalize(ownerValue) }));
         }
         if (TryParsePhoneWizardState(context.Arguments, "add-create", out var createState))
         {
@@ -3270,24 +3173,22 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             var addComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, createState.Name, createState.Description, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Created phone '{createState.Name}'" +
                 (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid}).") +
                 $" Description: '{addComposedDescription}'." +
                 $" Use 'phones select {createState.Name}' -> Numbers to assign its lines/DNs.");
-            return 0;
         }
         if (context.Arguments is ["edit", var editPhoneName])
         {
             var phone = await RequirePhoneAsync(cucm, editPhoneName, context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Edit phone {editPhoneName}",
                 "Description (fallback name/text; used verbatim when compliance can't be evaluated, " +
                     "or in place of the owner's name when no owner is assigned)",
                 ["phones", "edit-device-pool", editPhoneName],
                 PhoneConfigurationChecks.ExtractRawDescription(phone.Description),
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             ["edit-device-pool", var devicePoolEditPhoneName, var editDescriptionRaw])
@@ -3318,12 +3219,11 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         editDescription ?? string.Empty, pool.Name,
                     ]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Select device pool",
                 ["NAME", "DESCRIPTION"],
                 rows,
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             ["edit-owner", var ownerEditPhoneName, var ownerEditDescriptionRaw, var ownerEditDevicePoolRaw])
@@ -3332,7 +3232,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 cucm,
                 ownerEditPhoneName,
                 context.CancellationToken);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Edit phone {ownerEditPhoneName}",
                 "Owner user ID",
                 [
@@ -3341,7 +3241,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 ],
                 phone.OwnerUserName,
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -3376,12 +3275,11 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         template.Name,
                     ]));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Select phone button template",
                 ["NAME", "DESCRIPTION"],
                 rows,
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -3391,7 +3289,7 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
         {
             // Empty values mean "leave unchanged" (UpdatePhoneAsync omits null fields), so
             // reviewing an intentional blank-out isn't distinguishable from "no change" here.
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Review changes to {reviewPhoneName}",
                 ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "BUTTON TEMPLATE"],
                 [
@@ -3418,7 +3316,6 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is
             [
@@ -3438,60 +3335,64 @@ static async ValueTask<int> PhonesAsync(ModuleContext context)
                 Normalize(updateTemplateRaw));
             var updateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, updatePhoneName, Normalize(updateDescriptionRaw), context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'.");
-            return 0;
         }
 
-        context.Error.WriteLine(
+        return ModuleCommandResult.Fail(
             "Usage: vt cucm phones list [--max <count>] [--page-size <count>]\n" +
             "       vt cucm phones add\n" +
-            "       vt cucm phones check <phone> [basic-room|classroom|room-routing]");
-        return 2;
+            "       vt cucm phones check <phone> [basic-room|classroom|room-routing]",
+            exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
-static async Task RespondWithAvailableUserDidsAsync(
+static async Task<ModuleResponse> CreateAvailableUserDidsResponseAsync(
     ModuleContext context,
     string phoneName,
-    int lineIndex)
+    int lineIndex,
+    string? note = null)
 {
     var available = (await new UserDidStore(context.DataDirectory)
         .LoadAsync(context.CancellationToken))
         .Where(did => did.Assignment is null)
         .ToArray();
-    await context.RespondAsync(new ModuleTableResponse(
+    var rows = available.Select(did => new ModuleTableRow(
+        $"{did.Pattern}:{did.RoutePartitionName}",
+        [
+            did.Pattern,
+            DisplayPartition(did.RoutePartitionName),
+            Clean(did.Description),
+            string.IsNullOrWhiteSpace(did.RoutePartitionName)
+                ? "Resolve from CUCM"
+                : "Ready",
+        ],
+        [
+            "phones", "did-review", phoneName, lineIndex.ToString(),
+            did.Pattern, did.RoutePartitionName ?? string.Empty,
+        ])).ToList();
+    if (note is not null)
+    {
+        rows.Insert(0, new ModuleTableRow("note", [string.Empty, string.Empty, note, string.Empty]));
+    }
+    return new ModuleTableResponse(
         $"Available user DNs for line {lineIndex} on {phoneName}",
         ["DID", "PARTITION", "DESCRIPTION", "STATUS"],
-        available.Select(did => new ModuleTableRow(
-            $"{did.Pattern}:{did.RoutePartitionName}",
-            [
-                did.Pattern,
-                DisplayPartition(did.RoutePartitionName),
-                Clean(did.Description),
-                string.IsNullOrWhiteSpace(did.RoutePartitionName)
-                    ? "Resolve from CUCM"
-                    : "Ready",
-            ],
-            [
-                "phones", "did-review", phoneName, lineIndex.ToString(),
-                did.Pattern, did.RoutePartitionName ?? string.Empty,
-            ])).ToArray()));
+        rows);
 }
 
-static async ValueTask<int> UserDidsAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context)
 {
     try
     {
         var store = new UserDidStore(context.DataDirectory);
         if (context.Arguments.Count == 0)
         {
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "User DN inventory",
                 ["ACTION", "DETAIL"],
                 [
@@ -3508,12 +3409,11 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                         ["Replace", "Replace the unassigned inventory after Save confirmation"],
                         ["dids", "replace"]),
                 ]));
-            return 0;
         }
         if (context.Arguments is ["list"])
         {
             var dids = await store.LoadAsync(context.CancellationToken);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Local user DN inventory",
                 ["DID", "PARTITION", "STATUS", "USER", "PHONE", "SLOT"],
                 dids.Select(did => new ModuleTableRow(
@@ -3528,28 +3428,25 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                         did.Assignment?.LineIndex.ToString() ?? string.Empty,
                     ])).ToArray(),
                 Selectable: false));
-            return 0;
         }
         if (context.Arguments is ["add"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Add user DNs",
                 "Comma-separated four-digit DNs or numeric start..end range",
                 ["dids", "add-values"]));
-            return 0;
         }
         if (context.Arguments is ["replace"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Replace user DNs",
                 "Comma-separated four-digit extensions or numeric start..end range",
                 ["dids", "replace-review"]));
-            return 0;
         }
         if (context.Arguments is ["replace-review", var replacementValues])
         {
             var replacementPatterns = UserDidStore.ParsePatterns(replacementValues);
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Review user DN inventory replacement",
                 ["ACTION", "NEW COUNT", "FIRST", "LAST"],
                 [
@@ -3564,7 +3461,6 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                         ["dids", "replace-values", replacementValues]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["replace-values", var confirmedReplacementValues])
         {
@@ -3576,9 +3472,8 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                 context.Configuration.GetValueOrDefault("user-did-css"),
                 context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Replaced the local inventory with {replacementPatterns.Count} user DNs.");
-            return 0;
         }
         if (context.Arguments.Count == 2 &&
             context.Arguments[0] is "add-values" or "add")
@@ -3592,20 +3487,18 @@ static async ValueTask<int> UserDidsAsync(ModuleContext context)
                 context.Configuration.GetValueOrDefault("user-did-css"),
                 context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Added {added} user DN{(added == 1 ? string.Empty : "s")}; " +
                 $"{patterns.Count - added} already existed in the local inventory.");
-            return 0;
         }
 
-        context.Error.WriteLine(
-            "Usage: vt cucm dids [list|add [<dn,dn|start..end>]|replace]");
-        return 2;
+        return ModuleCommandResult.Fail(
+            "Usage: vt cucm dids [list|add [<dn,dn|start..end>]|replace]",
+            exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
@@ -3839,7 +3732,7 @@ static async Task ApplyClassroomLineAsync(
 
 // For "user" kind templates: prompts for an owner (if the template calls for one), otherwise
 // proceeds straight to the review screen with no owner.
-static async Task RespondWithLineTemplateOwnerOrReviewAsync(
+static async Task<ModuleResponse> CreateLineTemplateOwnerOrReviewResponseAsync(
     ModuleContext context,
     CucmService cucm,
     LineTemplate template,
@@ -3852,7 +3745,7 @@ static async Task RespondWithLineTemplateOwnerOrReviewAsync(
     if (template.AssociateEndUser)
     {
         var phoneForOwnerPrompt = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
-        await context.RespondAsync(new ModuleTextPromptResponse(
+        return new ModuleTextPromptResponse(
             $"Owner for {pattern}",
             "Owner user ID (leave blank for none)",
             [
@@ -3860,11 +3753,10 @@ static async Task RespondWithLineTemplateOwnerOrReviewAsync(
                 templateName, pattern, routePartitionName ?? string.Empty,
             ],
             phoneForOwnerPrompt.OwnerUserName,
-            AllowEmpty: true));
-        return;
+            AllowEmpty: true);
     }
     var phone = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
-    await RespondWithLineTemplateReviewAsync(
+    return await CreateLineTemplateReviewResponseAsync(
         context, cucm, template, templateName, phone, phoneName, lineIndex, pattern,
         routePartitionName, ownerUserId: null, room: null, building: null);
 }
@@ -3872,7 +3764,7 @@ static async Task RespondWithLineTemplateOwnerOrReviewAsync(
 // Substitutes the template's tokens against the resolved context, then renders a single-row
 // "review" table (Save-confirmed) whose row Arguments carry every concrete resolved value forward
 // to 'apply-template-apply'. Null substituted fields mean "leave unchanged" and are not written.
-static async Task RespondWithLineTemplateReviewAsync(
+static async Task<ModuleResponse> CreateLineTemplateReviewResponseAsync(
     ModuleContext context,
     CucmService cucm,
     LineTemplate template,
@@ -3908,7 +3800,7 @@ static async Task RespondWithLineTemplateReviewAsync(
 
     var existing = await cucm.GetDirectoryNumberAsync(pattern, routePartitionName, context.CancellationToken);
 
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         $"Review template '{templateName}' for line {lineIndex} on {phoneName}",
         [
             "DN", "PARTITION", "DN ACTION", "ALERTING NAME", "CALLER ID", "LABEL",
@@ -3935,10 +3827,10 @@ static async Task RespondWithLineTemplateReviewAsync(
                     ownerUserId ?? string.Empty,
                 ]),
         ],
-        SubmitMode: ModuleTableSubmitMode.Save));
+            SubmitMode: ModuleTableSubmitMode.Save);
 }
 
-static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
+static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext context)
 {
     try
     {
@@ -3966,11 +3858,10 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                         ? null
                         : DirectoryNumberPatternArguments("select", rowPattern, rowPartition)));
             }
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "CUCM directory numbers",
                 ["PATTERN", "PARTITION", "DESCRIPTION", "CSS", "VOICEMAIL PROFILE"],
                 rows));
-            return 0;
         }
         if (TryParseDirectoryNumberPatternArguments(
             context.Arguments,
@@ -3984,7 +3875,7 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 selectPartition,
                 context.CancellationToken);
             var selectedPartition = selected.RoutePartitionName ?? selectPartition;
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"CUCM directory number: {selected.Pattern}",
                 ["ACTION", "DETAIL"],
                 [
@@ -4004,7 +3895,6 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                         ["Delete", "Remove this directory number from CUCM"],
                         DirectoryNumberPatternArguments("delete", selectPattern, selectedPartition)),
                 ]));
-            return 0;
         }
         if (TryParseDirectoryNumberPatternArguments(
             context.Arguments,
@@ -4017,8 +3907,7 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 infoPattern,
                 infoPartition,
                 context.CancellationToken);
-            await RespondWithDirectoryNumberInfoAsync(context, line);
-            return 0;
+            return ModuleCommandResult.Render(CreateDirectoryNumberInfoResponse(line));
         }
         if (TryParseDirectoryNumberPatternArguments(
             context.Arguments,
@@ -4040,56 +3929,50 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 current.CallForwardAll.Destination,
                 current.CallForwardAll.CallingSearchSpaceName,
                 current.CallForwardAll.ForwardToVoiceMail);
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Edit directory number {editState.Pattern}",
                 "Description",
                 WizardArguments("edit-css", editState),
                 editState.Description,
                 AllowEmpty: true));
-            return 0;
         }
         if (TryParseWizardStateWithOptionalValue(context.Arguments, "edit-css", out var editCssBaseState, out var editDescription))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select line calling search space",
                 "edit-voicemail-profile",
                 editCssBaseState with { Description = Normalize(editDescription) },
-                "css");
-            return 0;
+                "css"));
         }
         if (TryParseWizardState(context.Arguments, "edit-voicemail-profile", out var editCssState))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select voicemail profile",
                 "edit-forward",
                 editCssState,
-                "voicemail-profile");
-            return 0;
+                "voicemail-profile"));
         }
         if (TryParseWizardState(context.Arguments, "edit-forward", out var editVoicemailState))
         {
-            await RespondWithForwardingSelectorAsync(
-                context,
+            return ModuleCommandResult.Render(CreateForwardingSelectorResponse(
                 editVoicemailState,
                 "edit-review",
                 "edit-forward-destination",
-                "edit-forward-voicemail");
-            return 0;
+                "edit-forward-voicemail"));
         }
         if (TryParseWizardState(
             context.Arguments,
             "edit-forward-destination",
             out var editDestinationState))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Configure forward all",
                 "Forward destination",
                 WizardArguments("edit-forward-destination-value", editDestinationState)));
-            return 0;
         }
         if (TryParseWizardStateWithValue(
             context.Arguments,
@@ -4097,47 +3980,42 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
             out var editDestinationValueState,
             out var editForwardDestination))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select forward-all calling search space",
                 "edit-review",
                 editDestinationValueState with { ForwardDestination = editForwardDestination },
-                "forward-css");
-            return 0;
+                "forward-css"));
         }
         if (TryParseWizardState(
             context.Arguments,
             "edit-forward-voicemail",
             out var editVoicemailForwardState))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select forward-all calling search space",
                 "edit-review",
                 editVoicemailForwardState with { ForwardToVoiceMail = true },
-                "forward-css");
-            return 0;
+                "forward-css"));
         }
         if (TryParseWizardState(context.Arguments, "edit-review", out var editReviewState))
         {
-            await RespondWithDirectoryNumberReviewAsync(
-                context,
+            return ModuleCommandResult.Render(CreateDirectoryNumberReviewResponse(
                 editReviewState,
                 "Review directory number changes",
-                "edit-update");
-            return 0;
+                "edit-update"));
         }
         if (TryParseWizardState(context.Arguments, "edit-update", out var editUpdateState))
         {
             await cucm.UpdateDirectoryNumberAsync(
                 editUpdateState.ToUpdateRequest(),
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Updated directory number '{editUpdateState.Pattern}' in partition " +
                 $"'{DisplayPartition(editUpdateState.RoutePartitionName)}'.");
-            return 0;
         }
         if (TryParseDirectoryNumberPatternArguments(
             context.Arguments,
@@ -4151,7 +4029,7 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 deletePartition,
                 context.CancellationToken);
             var deletePartitionResolved = toDelete.RoutePartitionName ?? deletePartition;
-            await context.RespondAsync(new ModuleTableResponse(
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 "Confirm delete",
                 ["PATTERN", "PARTITION", "DESCRIPTION"],
                 [
@@ -4168,7 +4046,6 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                         ]),
                 ],
                 SubmitMode: ModuleTableSubmitMode.Save));
-            return 0;
         }
         if (context.Arguments is ["delete-confirm", var confirmPattern, var confirmPartitionRaw])
         {
@@ -4177,84 +4054,75 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 confirmPattern,
                 confirmPartition,
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Deleted directory number '{confirmPattern}' from partition " +
                 $"'{DisplayPartition(confirmPartition)}'.");
-            return 0;
         }
         if (context.Arguments is ["add"])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Add CUCM directory number",
                 "Directory number",
                 ["dn", "add-description"]));
-            return 0;
         }
         if (context.Arguments is ["add-description", var descriptionPattern])
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add directory number {descriptionPattern}",
                 "Description",
                 ["dn", "add-partition", descriptionPattern],
                 AllowEmpty: true));
-            return 0;
         }
         if (context.Arguments is ["add-partition", var partitionPattern, var description])
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select route partition",
                 "add-css",
                 new DnWizardState(partitionPattern, description),
-                "partition");
-            return 0;
+                "partition"));
         }
         if (TryParseWizardState(context.Arguments, "add-css", out var partitionState))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select line calling search space",
                 "add-voicemail-profile",
                 partitionState,
-                "css");
-            return 0;
+                "css"));
         }
         if (TryParseWizardState(
             context.Arguments,
             "add-voicemail-profile",
             out var cssState))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select voicemail profile",
                 "add-forward",
                 cssState,
-                "voicemail-profile");
-            return 0;
+                "voicemail-profile"));
         }
         if (TryParseWizardState(context.Arguments, "add-forward", out var forwardingState))
         {
-            await RespondWithForwardingSelectorAsync(
-                context,
+            return ModuleCommandResult.Render(CreateForwardingSelectorResponse(
                 forwardingState,
                 "add-review",
                 "add-forward-destination",
-                "add-forward-voicemail");
-            return 0;
+                "add-forward-voicemail"));
         }
         if (TryParseWizardState(
             context.Arguments,
             "add-forward-destination",
             out var destinationState))
         {
-            await context.RespondAsync(new ModuleTextPromptResponse(
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 "Configure forward all",
                 "Forward destination",
                 WizardArguments("add-forward-destination-value", destinationState)));
-            return 0;
         }
         if (TryParseWizardStateWithValue(
             context.Arguments,
@@ -4262,48 +4130,43 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
             out var destinationValueState,
             out var forwardDestination))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select forward-all calling search space",
                 "add-review",
                 destinationValueState with { ForwardDestination = forwardDestination },
-                "forward-css");
-            return 0;
+                "forward-css"));
         }
         if (TryParseWizardState(
             context.Arguments,
             "add-forward-voicemail",
             out var voicemailForwardState))
         {
-            await RespondWithNamedSelectorAsync(
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
                 cucm,
                 "Select forward-all calling search space",
                 "add-review",
                 voicemailForwardState with { ForwardToVoiceMail = true },
-                "forward-css");
-            return 0;
+                "forward-css"));
         }
         if (TryParseWizardState(context.Arguments, "add-review", out var reviewState))
         {
-            await RespondWithDirectoryNumberReviewAsync(
-                context,
+            return ModuleCommandResult.Render(CreateDirectoryNumberReviewResponse(
                 reviewState,
                 "Review directory number",
-                "add-create");
-            return 0;
+                "add-create"));
         }
         if (TryParseWizardState(context.Arguments, "add-create", out var createState))
         {
             var uuid = await cucm.AddDirectoryNumberAsync(
                 createState.ToRequest(),
                 context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Created directory number '{createState.Pattern}' in partition " +
                 $"'{DisplayPartition(createState.RoutePartitionName)}'" +
                 (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid})."));
-            return 0;
         }
         if (context.Arguments.Count > 1 && context.Arguments[0] == "add")
         {
@@ -4312,31 +4175,26 @@ static async ValueTask<int> DirectoryNumbersAsync(ModuleContext context)
                 out var request,
                 out var error))
             {
-                context.Error.WriteLine(error);
-                WriteDirectoryNumberUsage(context);
-                return 2;
+                return ModuleCommandResult.Fail(
+                    $"{error}\n{DirectoryNumberUsage()}",
+                    exitCode: 2);
             }
             var uuid = await cucm.AddDirectoryNumberAsync(request, context.CancellationToken);
-            context.Output.WriteLine(
+            return ModuleCommandResult.Ok(
                 $"Created directory number '{request.Pattern}' in partition " +
                 $"'{DisplayPartition(request.RoutePartitionName)}'" +
                 (string.IsNullOrWhiteSpace(uuid) ? "." : $" ({uuid})."));
-            return 0;
         }
 
-        WriteDirectoryNumberUsage(context);
-        return 2;
+        return ModuleCommandResult.Fail(DirectoryNumberUsage(), exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
     {
-        context.Error.WriteLine(exception.Message);
-        return 1;
+        return ModuleCommandResult.Fail(exception.Message);
     }
 }
 
-static async Task RespondWithDirectoryNumberInfoAsync(
-    ModuleContext context,
-    CucmDirectoryNumber line)
+static ModuleResponse CreateDirectoryNumberInfoResponse(CucmDirectoryNumber line)
 {
     var cfa = line.CallForwardAll;
     var forwarding = cfa.ForwardToVoiceMail
@@ -4344,7 +4202,7 @@ static async Task RespondWithDirectoryNumberInfoAsync(
         : string.IsNullOrWhiteSpace(cfa.Destination)
             ? "Disabled"
             : cfa.Destination;
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         $"CUCM directory number: {line.Pattern}",
         ["PROPERTY", "VALUE"],
         [
@@ -4363,10 +4221,10 @@ static async Task RespondWithDirectoryNumberInfoAsync(
                 ["Forward-all CSS", Clean(cfa.CallingSearchSpaceName)]),
         ],
         Selectable: false,
-        Searchable: false));
+        Searchable: false);
 }
 
-static async Task RespondWithNamedSelectorAsync(
+    static async Task<ModuleResponse> CreateNamedSelectorResponseAsync(
     ModuleContext context,
     CucmService cucm,
     string title,
@@ -4398,20 +4256,19 @@ static async Task RespondWithNamedSelectorAsync(
             [Clean(resource.Name), Clean(resource.Description)],
             WizardArguments(nextRoute, SetWizardResource(state, resourceType, resource.Name))));
     }
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         title,
         ["NAME", "DESCRIPTION"],
         rows,
-        SubmitMode: ModuleTableSubmitMode.Save));
+        SubmitMode: ModuleTableSubmitMode.Save);
 }
 
-static Task RespondWithForwardingSelectorAsync(
-    ModuleContext context,
+static ModuleResponse CreateForwardingSelectorResponse(
     DnWizardState state,
     string disabledRoute,
     string destinationRoute,
     string voicemailRoute) =>
-    context.RespondAsync(new ModuleTableResponse(
+    new ModuleTableResponse(
         "Configure forward all",
         ["OPTION", "DETAIL"],
         [
@@ -4428,10 +4285,9 @@ static Task RespondWithForwardingSelectorAsync(
                 ["Voicemail", "Forward all calls to voicemail"],
                 WizardArguments(voicemailRoute, state)),
         ],
-        SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
+            SubmitMode: ModuleTableSubmitMode.Save);
 
-static Task RespondWithDirectoryNumberReviewAsync(
-    ModuleContext context,
+        static ModuleResponse CreateDirectoryNumberReviewResponse(
     DnWizardState state,
     string title,
     string submitRoute)
@@ -4441,7 +4297,7 @@ static Task RespondWithDirectoryNumberReviewAsync(
         : string.IsNullOrWhiteSpace(state.ForwardDestination)
             ? "Disabled"
             : state.ForwardDestination;
-    return context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         title,
         ["PATTERN", "PARTITION", "DESCRIPTION", "CSS", "VOICEMAIL", "FORWARD ALL", "FORWARD CSS"],
         [
@@ -4458,7 +4314,7 @@ static Task RespondWithDirectoryNumberReviewAsync(
                 ],
                 WizardArguments(submitRoute, state)),
             ],
-            SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
+            SubmitMode: ModuleTableSubmitMode.Save);
 }
 
 static DnWizardState SetWizardResource(
@@ -4473,7 +4329,7 @@ static DnWizardState SetWizardResource(
     _ => throw new InvalidOperationException($"Unknown CUCM resource type '{resourceType}'."),
 };
 
-static async Task RespondWithPhoneNamedSelectorAsync(
+static async Task<ModuleResponse> CreatePhoneNamedSelectorResponseAsync(
     ModuleContext context,
     CucmService cucm,
     string title,
@@ -4511,11 +4367,11 @@ static async Task RespondWithPhoneNamedSelectorAsync(
             [Clean(resource.Name), Clean(resource.Description)],
             PhoneWizardArguments(nextRoute, SetPhoneWizardResource(state, resourceType, resource.Name))));
     }
-    await context.RespondAsync(new ModuleTableResponse(
+    return new ModuleTableResponse(
         title,
         ["NAME", "DESCRIPTION"],
         rows,
-        SubmitMode: ModuleTableSubmitMode.Save));
+        SubmitMode: ModuleTableSubmitMode.Save);
 }
 
 static PhoneWizardState SetPhoneWizardResource(
@@ -4529,8 +4385,8 @@ static PhoneWizardState SetPhoneWizardResource(
     _ => throw new InvalidOperationException($"Unknown CUCM phone resource type '{resourceType}'."),
 };
 
-static Task RespondWithPhoneCreateReviewAsync(ModuleContext context, PhoneWizardState state) =>
-    context.RespondAsync(new ModuleTableResponse(
+static ModuleResponse CreatePhoneReviewResponse(PhoneWizardState state) =>
+    new ModuleTableResponse(
         "Review new phone",
         ["NAME", "DESCRIPTION", "PRODUCT", "DEVICE POOL", "PHONE TEMPLATE", "SECURITY PROFILE", "OWNER"],
         [
@@ -4547,7 +4403,7 @@ static Task RespondWithPhoneCreateReviewAsync(ModuleContext context, PhoneWizard
                 ],
                 PhoneWizardArguments("add-create", state)),
         ],
-        SubmitMode: ModuleTableSubmitMode.Save)).AsTask();
+            SubmitMode: ModuleTableSubmitMode.Save);
 
 static IReadOnlyList<string> PhoneWizardArguments(string route, PhoneWizardState state) =>
     [
@@ -4801,15 +4657,14 @@ static bool TryParseWizardStateWithOptionalValue(
     return true;
 }
 
-static void WriteDirectoryNumberUsage(ModuleContext context) =>
-    context.Error.WriteLine(
+static string DirectoryNumberUsage() =>
         "Usage: vt cucm dn list [--max <count>] [--page-size <count>]\n" +
         "       vt cucm dn info <pattern> [--partition <name>]\n" +
         "       vt cucm dn edit <pattern> [--partition <name>]\n" +
         "       vt cucm dn delete <pattern> [--partition <name>]\n" +
         "       vt cucm dn add [<pattern> [--partition <name>] [--description <text>] " +
         "[--css <name>] [--voicemail-profile <name>] [--forward-destination <number>] " +
-        "[--forward-css <name>] [--forward-to-voicemail]]");
+        "[--forward-css <name>] [--forward-to-voicemail]]";
 
 static string DisplayPartition(string? partition) =>
     string.IsNullOrWhiteSpace(partition) ? "<None>" : Clean(partition);

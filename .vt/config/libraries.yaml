@@ -6,14 +6,14 @@ libraries:
     path: libs/VSharp
     upstream_branch: main
     work_branch: cucm
-    base_commit: 9993fb16e11931bf7e5e13e24c94ba8eb014bb2f
-    version: 0.2.0
+    base_commit: ab67228d8671ffa6e968c2fb09d8bbe8d211578e
+    version: 0.3.0
   VTModuleSDK:
     repository: vharris-psp/VTModuleSDK
     url: https://github.com/vharris-psp/VTModuleSDK.git
     path: libs/VTModuleSDK
     upstream_branch: main
     work_branch: cucm
-    base_commit: e1f02dc5aae824845ee6a82ba389121301ef0d52
-    version: 0.2.0
+    base_commit: 59065739613ac41c4ba662f427b33baa0c075506
+    version: 0.5.1
 ...
