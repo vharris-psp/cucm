@@ -81,6 +81,20 @@ public sealed class ClassroomPhoneWorkflowTests
     }
 
     [Fact]
+    public void PlannerDerivesDevicePoolFromSelectedLocation()
+    {
+        var plan = CreatePlan();
+        var devicePoolChange = Assert.Single(
+            plan.Changes.Where(change => change.Key == "phone.device-pool"));
+
+        Assert.Equal("HS-Classroom", plan.DevicePoolName);
+        Assert.Equal("Old Pool", devicePoolChange.Current);
+        Assert.Equal("HS-Classroom", devicePoolChange.Target);
+        Assert.Equal("Update", devicePoolChange.Action);
+        Assert.Equal("HS-Rooms", plan.RoomLine.RoutePartitionName);
+    }
+
+    [Fact]
     public void PlannerRejectsIncompleteClassroomConfiguration()
     {
         var input = CreateInput() with
@@ -258,7 +272,11 @@ public sealed class ClassroomPhoneWorkflowTests
             ["SEP0001", "SEPOtherOldPhone"]);
         var buildingPatterns = new Dictionary<string, BuildingPattern>(StringComparer.OrdinalIgnoreCase)
         {
-            ["HS"] = new BuildingPattern("HS-Rooms", ["HS-Classroom"], "HS-UserRoom"),
+            ["HS"] = new BuildingPattern(
+                "HS-Rooms",
+                ["HS-Legacy"],
+                "HS-UserRoom",
+                "HS-Classroom"),
         };
         var policies = new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase)
         {

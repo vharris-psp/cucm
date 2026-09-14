@@ -20,8 +20,9 @@ return await ModuleApplication
         defaultValue: "{}")
     .Setting(
         "building-patterns",
-        "JSON object mapping building codes to { routePartitionName, devicePools[], phoneTemplateName? } " +
-            "used for room DN creation, classroom phone-template application, and room-routing checks",
+        "JSON object mapping location codes to { routePartitionName, devicePoolName, devicePools[], " +
+            "phoneTemplateName? } used for room DN creation, classroom device-pool/template application, " +
+            "and room-routing checks",
         required: false,
         defaultValue: "{}")
     .Setting(
@@ -2369,8 +2370,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 classroomUserPhoneName);
             var buildingPatterns = RequireBuildingPatterns(context);
             return ModuleCommandResult.Render(new ModuleTableResponse(
-                $"Select a room building for {classroomUserPhoneName}",
-                ["BUILDING", "PARTITION", "DEVICE POOLS"],
+                $"Select a room location for {classroomUserPhoneName}",
+                ["LOCATION", "ROOM PARTITION", "TARGET DEVICE POOL"],
                 buildingPatterns
                     .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
                     .Select(pair => new ModuleTableRow(
@@ -2378,9 +2379,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         [
                             pair.Key,
                             pair.Value.RoutePartitionName,
-                            pair.Value.DevicePoolNames.Count == 0
-                                ? "<none>"
-                                : string.Join(", ", pair.Value.DevicePoolNames),
+                            pair.Value.DevicePoolName ?? "<not configured>",
                         ],
                         ClassroomWorkflowNavigation.SelectBuilding(
                             classroomUserPhoneName,
@@ -2402,7 +2401,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 classroomRoomPhoneName);
             _ = RequireBuildingPattern(RequireBuildingPatterns(context), classroomBuildingCode);
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
-                $"Room number for building {classroomBuildingCode}",
+                $"Room number for location {classroomBuildingCode}",
                 "Room number (3 digits)",
                 ClassroomWorkflowNavigation.ReviewRoom(
                     classroomRoomPhoneName,

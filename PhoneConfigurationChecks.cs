@@ -33,7 +33,8 @@ internal sealed record PhoneCheckResult(
 internal sealed record BuildingPattern(
     string RoutePartitionName,
     IReadOnlyList<string> DevicePoolNames,
-    string? PhoneTemplateName = null);
+    string? PhoneTemplateName = null,
+    string? DevicePoolName = null);
 
 internal enum TemplateComplianceSlotKind
 {
@@ -197,8 +198,8 @@ internal static class PhoneConfigurationChecks
                     property.Value.ValueKind != JsonValueKind.Object)
                 {
                     throw new InvalidOperationException(
-                        "CUCM setting 'building-patterns' must map building codes to objects with " +
-                        "'routePartitionName' and 'devicePools'.");
+                        "CUCM setting 'building-patterns' must map location codes to objects with " +
+                        "'routePartitionName', 'devicePoolName', and optional 'devicePools'.");
                 }
                 var routePartitionName = ReadString(property.Value, "routePartitionName");
                 if (string.IsNullOrWhiteSpace(routePartitionName))
@@ -228,10 +229,18 @@ internal static class PhoneConfigurationChecks
                         devicePools.Add(devicePool.GetString()!.Trim());
                     }
                 }
+                var devicePoolName = ReadString(property.Value, "devicePoolName");
+                if (devicePoolName is not null && !devicePools.Contains(
+                    devicePoolName,
+                    StringComparer.OrdinalIgnoreCase))
+                {
+                    devicePools.Add(devicePoolName);
+                }
                 patterns[property.Name.Trim()] = new BuildingPattern(
                     routePartitionName!,
                     devicePools,
-                    ReadString(property.Value, "phoneTemplateName"));
+                    ReadString(property.Value, "phoneTemplateName"),
+                    devicePoolName);
             }
             return patterns;
         }
@@ -552,8 +561,13 @@ internal static class PhoneConfigurationChecks
             return [];
         }
         return buildingPatterns
-            .Where(pair => pair.Value.DevicePoolNames.Any(pool =>
-                pool.Equals(devicePoolName, StringComparison.OrdinalIgnoreCase)))
+            .Where(pair =>
+                string.Equals(
+                    pair.Value.DevicePoolName,
+                    devicePoolName,
+                    StringComparison.OrdinalIgnoreCase) ||
+                pair.Value.DevicePoolNames.Any(pool =>
+                    pool.Equals(devicePoolName, StringComparison.OrdinalIgnoreCase)))
             .Select(pair => pair.Key)
             .ToArray();
     }

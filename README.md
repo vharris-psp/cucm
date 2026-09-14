@@ -104,24 +104,26 @@ The "fallback text" is manual, free-form text used whenever there's no owner (or
 
 ## Room DNs and building routing
 
-Configure `building-patterns` with `vt module configure cucm` — a JSON object mapping building codes to the route partition and device pools used for local room routing:
+Configure `building-patterns` with `vt module configure cucm` — a JSON object mapping location codes to the route partition, assignment device pool, and recognized device pools used for local room routing:
 
 ```json
 {
   "PHS": {
     "routePartitionName": "PHS-Rooms",
+    "devicePoolName": "PHS-DP-Classrooms",
     "devicePools": ["PHS-DP-Classrooms"],
     "phoneTemplateName": "PHS-UserRoom"
   },
   "MS": {
     "routePartitionName": "MS-Rooms",
+    "devicePoolName": "MS-DP-Classrooms",
     "devicePools": ["MS-DP-Classrooms"],
     "phoneTemplateName": "MS-UserRoom"
   }
 }
 ```
 
-Each building's `devicePools` list should be disjoint — a device pool listed under two buildings is flagged as a configuration error by the room-routing check below, since it makes the building unresolvable from the phone alone. `phoneTemplateName` is optional for audits; the classroom workflow applies it when present, or retains the phone's current button template otherwise.
+The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The optional `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. `phoneTemplateName` is optional for audits; the classroom workflow applies it when present, or retains the phone's current button template otherwise.
 
 From an existing phone, choose **Apply classroom template**, select a user, then select the room's building and enter its 3-digit number. The module resolves the effective phone button template and requires its `template-compliance-policies` entry to define exactly one user slot and one room slot. It also requires unambiguous `building-patterns` and complete room/user line templates named by the required `classroom-room-line-template` and `classroom-user-line-template` settings. The configured templates must resolve non-empty alerting name, caller ID, label, external mask, and voicemail values; the configured user template must set `associateEndUser` to `true`.
 

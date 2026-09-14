@@ -164,14 +164,10 @@ internal static class ClassroomPhonePlanner
             throw new InvalidOperationException(
                 $"Building '{input.BuildingCode}' is not present in the 'building-patterns' setting.");
         }
-        if (buildingPattern.DevicePoolNames.Count != 1)
-        {
+        var devicePoolName = Normalize(buildingPattern.DevicePoolName) ??
             throw new InvalidOperationException(
-                $"Building '{input.BuildingCode}' must list exactly one device pool in " +
-                "'building-patterns' to use the classroom template.");
-        }
-
-        var devicePoolName = buildingPattern.DevicePoolNames[0];
+                $"Location '{input.BuildingCode}' must define 'devicePoolName' in " +
+                "'building-patterns' to use the classroom workflow.");
         var mappedBuildings = PhoneConfigurationChecks.FindBuildingCodesForDevicePool(
             input.BuildingPatterns,
             devicePoolName);
