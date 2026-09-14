@@ -20,9 +20,8 @@ return await ModuleApplication
         defaultValue: "{}")
     .Setting(
         "building-patterns",
-        "JSON object mapping location codes to { routePartitionName, devicePoolName, devicePools[], " +
-            "phoneTemplateName? } used for room DN creation, classroom device-pool/template application, " +
-            "and room-routing checks",
+        "Legacy JSON fallback for building profiles. Manage building routing, device pools, and phone " +
+            "templates with 'vt cucm configure'.",
         required: false,
         defaultValue: "{}")
     .Setting(
@@ -51,7 +50,7 @@ return await ModuleApplication
         "Name of the user-kind line template used by the classroom workflow")
     .Setting(
         "phone-check-placeholder",
-        "Temporary JSON assignment with userDn, roomNumber, and location",
+        "Legacy JSON assignment used only by the basic-room checker",
         required: false,
         defaultValue: "{\"userDn\":\"1000\",\"roomNumber\":\"3000\",\"location\":\"default\"}")
     .Setting(
@@ -121,6 +120,12 @@ return await ModuleApplication
         GetAsync,
         ModuleResponseKind.Table)
     .Command(
+        "configure",
+        "Manage local CUCM module profiles with live AXL resource selectors.",
+        ModuleCommandState.Implemented,
+        ConfigureAsync,
+        ModuleResponseKind.Table)
+    .Command(
         "templates",
         "Create, review, and delete local line templates used by 'Apply template' and the classroom flow.",
         ModuleCommandState.Implemented,
@@ -161,10 +166,27 @@ static ValueTask<ModuleCommandOutcome> RootAsync(ModuleContext context)
                     ["Export CUCM data", "Query phones by device pool and export to console or a file"],
                     ["get"]),
                 new ModuleTableRow(
+                    "configure",
+                    ["Configure", "Manage building profiles using live CUCM resources"],
+                    ["configure"]),
+                new ModuleTableRow(
                     "templates",
                     ["Line templates", "Create and delete local line templates"],
                     ["templates"]),
             ])));
+}
+
+static async ValueTask<ModuleCommandOutcome> ConfigureAsync(ModuleContext context)
+{
+    try
+    {
+        using var cucm = await CreateCucmAsync(context);
+        return await BuildingConfigurationCommand.ExecuteAsync(context, cucm);
+    }
+    catch (Exception exception) when (IsExpected(exception))
+    {
+        return ModuleCommandResult.Fail(exception.Message);
+    }
 }
 
 // Composite wizard that chains the existing phone (add/edit) and user (assign) primitives into
@@ -1864,7 +1886,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         ["phones", "check", phoneNameForChecks, "basic-room"]),
                     new ModuleTableRow(
                         "classroom",
-                        ["Classroom", "Validate assigned-user and room lines"],
+                        ["Classroom", "Validate the owner's DN and building-derived room routing"],
                         ["phones", "check", phoneNameForChecks, "classroom"]),
                     new ModuleTableRow(
                         "room-routing",
@@ -1881,10 +1903,25 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             if (profile == PhoneConfigurationProfile.RoomRouting)
             {
                 await context.ReportProgressAsync("Resolving building patterns", 1, 3);
-                var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
-                    context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+                var buildingPatterns = await LoadBuildingPatternsAsync(context);
                 await context.ReportProgressAsync("Evaluating room routing", 2, 3);
                 results = PhoneConfigurationChecks.EvaluateRoomRouting(phone, buildingPatterns);
+            }
+            else if (profile == PhoneConfigurationProfile.Classroom)
+            {
+                await context.ReportProgressAsync("Resolving classroom policy and owner", 1, 3);
+                var buildingPatterns = await LoadBuildingPatternsAsync(context);
+                var compliancePolicies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
+                    context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");
+                var owner = string.IsNullOrWhiteSpace(phone.OwnerUserName)
+                    ? null
+                    : await cucm.GetUserAsync(phone.OwnerUserName, context.CancellationToken);
+                await context.ReportProgressAsync("Evaluating classroom configuration", 2, 3);
+                results = PhoneConfigurationChecks.EvaluateClassroom(
+                    phone,
+                    owner,
+                    compliancePolicies,
+                    buildingPatterns);
             }
             else
             {
@@ -2221,7 +2258,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             int.TryParse(roomLineIndexText, out var roomBuildingLineIndex) && roomBuildingLineIndex > 0)
         {
             _ = await RequirePhoneAsync(cucm, phoneNameForRoomBuilding, context.CancellationToken);
-            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPatterns = await RequireBuildingPatternsAsync(context);
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a building for line {roomBuildingLineIndex} on {phoneNameForRoomBuilding}",
                 ["BUILDING", "PARTITION", "DEVICE POOLS"],
@@ -2266,7 +2303,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             }
             var phone = await RequirePhoneAsync(cucm, phoneNameForRoomReview, context.CancellationToken);
             var line = phone.Lines.FirstOrDefault(candidate => candidate.Index == roomReviewLineIndex);
-            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPatterns = await RequireBuildingPatternsAsync(context);
             var buildingPattern = RequireBuildingPattern(buildingPatterns, roomReviewBuildingCode);
             var existing = await cucm.GetDirectoryNumberAsync(
                 roomNumber,
@@ -2305,7 +2342,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 throw new InvalidOperationException(
                     $"'{roomAssignNumber}' is not a valid three-digit room number.");
             }
-            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPatterns = await RequireBuildingPatternsAsync(context);
             var buildingPattern = RequireBuildingPattern(buildingPatterns, roomAssignBuildingCode);
             var existing = await cucm.GetDirectoryNumberAsync(
                 roomAssignNumber,
@@ -2386,7 +2423,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 context,
                 user,
                 classroomUserPhoneName);
-            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPatterns = await RequireBuildingPatternsAsync(context);
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Select a room location for {classroomUserPhoneName}",
                 ["LOCATION", "ROOM PARTITION", "TARGET DEVICE POOL"],
@@ -2417,7 +2454,9 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 context,
                 user,
                 classroomRoomPhoneName);
-            _ = RequireBuildingPattern(RequireBuildingPatterns(context), classroomBuildingCode);
+            _ = RequireBuildingPattern(
+                await RequireBuildingPatternsAsync(context),
+                classroomBuildingCode);
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Room number for location {classroomBuildingCode}",
                 "Room number (3 digits)",
@@ -2570,7 +2609,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             var template = await RequireLineTemplateAsync(context, contextTemplateName);
             if (template.Kind == LineTemplateKind.Room)
             {
-                var buildingPatterns = RequireBuildingPatterns(context);
+                var buildingPatterns = await RequireBuildingPatternsAsync(context);
                 var resolvedBuilding = PhoneConfigurationChecks.FindBuildingCodeForPhoneButtonTemplate(
                     buildingPatterns, phone.PhoneTemplateName);
                 if (resolvedBuilding is not null)
@@ -2658,7 +2697,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             }
             var phone = await RequirePhoneAsync(cucm, roomReviewTemplatePhoneName, context.CancellationToken);
             var template = await RequireLineTemplateAsync(context, roomReviewTemplateName);
-            var buildingPatterns = RequireBuildingPatterns(context);
+            var buildingPatterns = await RequireBuildingPatternsAsync(context);
             var buildingPattern = RequireBuildingPattern(buildingPatterns, roomReviewTemplateBuildingCode);
             return ModuleCommandResult.Render(await CreateLineTemplateReviewResponseAsync(
                 context,
@@ -3488,18 +3527,24 @@ static void EnsureUserDidCanBeAssigned(UserDid did, CucmDirectoryNumber? existin
     }
 }
 
-static IReadOnlyDictionary<string, BuildingPattern> RequireBuildingPatterns(ModuleContext context)
+static async Task<IReadOnlyDictionary<string, BuildingPattern>> RequireBuildingPatternsAsync(
+    ModuleContext context)
 {
-    var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
-        context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+    var buildingPatterns = await LoadBuildingPatternsAsync(context);
     if (buildingPatterns.Count == 0)
     {
         throw new InvalidOperationException(
-            "CUCM setting 'building-patterns' has no buildings configured. Define at least one " +
-            "building with a 'routePartitionName' before creating room DNs.");
+            "No CUCM building profiles are configured. Run 'vt cucm configure' and add or import " +
+            "at least one building before creating room DNs.");
     }
     return buildingPatterns;
 }
+
+static Task<IReadOnlyDictionary<string, BuildingPattern>> LoadBuildingPatternsAsync(
+    ModuleContext context) =>
+    new BuildingProfileStore(context.DataDirectory).LoadEffectiveAsync(
+        context.Configuration.GetValueOrDefault("building-patterns"),
+        context.CancellationToken);
 
 // Recomputes and (if changed) saves a phone's CUCM Description as a compliance summary, derived from
 // its assigned phone button template's compliance policy (see 'template-compliance-policies'):
@@ -3518,8 +3563,7 @@ static async Task<string> ComposeAndApplyPhoneDescriptionAsync(
 {
     var phone = await RequirePhoneAsync(cucm, phoneName, cancellationToken);
     var rawText = manualDescriptionRaw ?? PhoneConfigurationChecks.ExtractRawDescription(phone.Description);
-    var buildingPatterns = PhoneConfigurationChecks.ParseBuildingPatterns(
-        context.Configuration.GetValueOrDefault("building-patterns") ?? "{}");
+    var buildingPatterns = await LoadBuildingPatternsAsync(context);
     var policies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
         context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");
     var compliance = PhoneConfigurationChecks.EvaluateTemplateCompliance(phone, policies, buildingPatterns);
@@ -3604,7 +3648,7 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
     string buildingCode,
     string roomNumber)
 {
-    var buildingPatterns = RequireBuildingPatterns(context);
+    var buildingPatterns = await RequireBuildingPatternsAsync(context);
     var buildingPattern = RequireBuildingPattern(buildingPatterns, buildingCode);
     var compliancePolicies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
         context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");

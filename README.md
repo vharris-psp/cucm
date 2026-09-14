@@ -114,26 +114,27 @@ The "fallback text" is manual, free-form text used whenever there's no owner (or
 
 ## Room DNs and building routing
 
-Configure `building-patterns` with `vt module configure cucm` — a JSON object mapping location codes to the route partition, assignment device pool, and recognized device pools used for local room routing:
+Run `vt cucm configure`, choose **Buildings**, and then choose **Import legacy setting** once to migrate an existing `building-patterns` value into the local profile store. After migration, add or select a building from the same menu to manage it. The wizard uses live CUCM selectors for the room route partition, classroom target device pool, and phone button template, then prompts for any additional existing device pools that should resolve to the same building. Every add, edit, import, and delete ends with an explicit review and Save.
+
+Building profiles are stored in the module data directory as `building-profiles.json`. Once this file exists it is authoritative; the `building-patterns` module setting remains unchanged as a legacy fallback and rollback source. Before migration, the module continues reading that setting exactly as earlier releases did.
+
+The stored shape is:
 
 ```json
 {
-  "PHS": {
-    "routePartitionName": "PHS-Rooms",
-    "devicePoolName": "PHS-DP-Classrooms",
-    "devicePools": ["PHS-DP-Classrooms"],
-    "phoneTemplateName": "PHS-UserRoom"
-  },
-  "MS": {
-    "routePartitionName": "MS-Rooms",
-    "devicePoolName": "MS-DP-Classrooms",
-    "devicePools": ["MS-DP-Classrooms"],
-    "phoneTemplateName": "MS-UserRoom"
+  "schema": "vt-cucm-building-profiles/v1",
+  "buildings": {
+    "PHS": {
+      "routePartitionName": "HS-Rooms",
+      "devicePoolName": "HighSchool",
+      "devicePools": ["HighSchool", "HighSchool_SRST", "2024-HS-Pool"],
+      "phoneTemplateName": "Standard 7841 SIP 1DN-1SdBLF-2DN"
+    }
   }
 }
 ```
 
-The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The optional `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. `phoneTemplateName` is optional for audits; the classroom workflow applies it when present, or retains the phone's current button template otherwise.
+The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. The selected `phoneTemplateName` is applied by the classroom workflow.
 
 From an existing phone, choose **Apply template** and then **Classroom**. Select a user and location, then enter the room's 3-digit number. The module resolves the effective phone button template and requires its `template-compliance-policies` entry to define exactly one user slot and one room slot. It also requires unambiguous `building-patterns` and complete room/user line templates named by the required `classroom-room-line-template` and `classroom-user-line-template` settings. The room template supplies shared external-mask and voicemail defaults, while the selected location always derives the room partition and the room description, alerting name, caller ID, and line label as `<LOCATION> Room <ROOM>` (for example, `PHS Room 130`). The configured user template supplies the user-line values and must set `associateEndUser` to `true`.
 
@@ -145,7 +146,7 @@ From a phone's line menu (`vt cucm phones` → select a phone → **Numbers** �
 
 The same line menu offers **Remove directory number**, which reviews the line's current pattern/partition, then on save removes the line's DN assignment from the phone in CUCM and clears any matching local user-DN inventory assignment so that DN becomes available again.
 
-Run `vt cucm phones check <phone> room-routing` to audit a phone: it resolves the phone's building from its device pool (via `building-patterns`), flags an unresolved or ambiguous device pool, and checks that line 3 has a 3-digit number in the building's expected partition. This complements the existing `classroom` profile, which validates line 1/line 3 against the temporary `phone-check-placeholder` assignment source.
+Run `vt cucm phones check <phone> classroom` to audit the applied classroom template from live CUCM data. It resolves the user and room slots from the phone button template's compliance policy, compares the user slot with the phone owner's primary extension (falling back to the owner's four-digit LDAP telephone number), resolves the building from the phone's device pool, and validates the room number and partition. The narrower `room-routing` profile performs only the building, room-number, and partition checks.
 
 ## Provisioning a phone from scratch
 

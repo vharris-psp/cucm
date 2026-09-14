@@ -709,6 +709,98 @@ internal static class PhoneConfigurationChecks
         return results;
     }
 
+    internal static IReadOnlyList<PhoneCheckResult> EvaluateClassroom(
+        CucmPhone phone,
+        CucmUser? owner,
+        IReadOnlyDictionary<string, TemplateCompliancePolicy> policies,
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns)
+    {
+        ArgumentNullException.ThrowIfNull(phone);
+        ArgumentNullException.ThrowIfNull(policies);
+        ArgumentNullException.ThrowIfNull(buildingPatterns);
+
+        if (string.IsNullOrWhiteSpace(phone.PhoneTemplateName) ||
+            !policies.TryGetValue(phone.PhoneTemplateName, out var policy))
+        {
+            return
+            [
+                new PhoneCheckResult(
+                    "Classroom template",
+                    "A configured phone button template policy",
+                    Display(phone.PhoneTemplateName),
+                    PhoneCheckStatus.Unresolved,
+                    $"No compliance policy is configured for phone button template " +
+                        $"'{Display(phone.PhoneTemplateName)}'."),
+            ];
+        }
+
+        var userSlots = policy.Slots
+            .Where(slot => slot.Kind == TemplateComplianceSlotKind.User)
+            .Select(slot => slot.Index)
+            .Distinct()
+            .ToArray();
+        var roomSlots = policy.Slots
+            .Where(slot => slot.Kind == TemplateComplianceSlotKind.Room)
+            .Select(slot => slot.Index)
+            .Distinct()
+            .ToArray();
+        if (userSlots.Length != 1 || roomSlots.Length != 1 || userSlots[0] == roomSlots[0])
+        {
+            return
+            [
+                new PhoneCheckResult(
+                    "Classroom template",
+                    "Exactly one user slot and one room slot",
+                    phone.PhoneTemplateName,
+                    PhoneCheckStatus.Unresolved,
+                    "The configured template compliance policy does not define a valid classroom layout."),
+            ];
+        }
+
+        var userLine = phone.Lines.FirstOrDefault(line => line.Index == userSlots[0]);
+        var ownerExtension = UserDidStore.NormalizeUserExtension(owner?.PrimaryExtension?.Pattern) ??
+            UserDidStore.NormalizeUserExtension(owner?.TelephoneNumber);
+        var results = new List<PhoneCheckResult>();
+        if (string.IsNullOrWhiteSpace(phone.OwnerUserName))
+        {
+            results.Add(new PhoneCheckResult(
+                $"Line {userSlots[0]} assigned user DN",
+                "DN assigned to the phone owner",
+                Display(userLine?.Pattern),
+                PhoneCheckStatus.Unresolved,
+                "The phone has no assigned owner."));
+        }
+        else if (owner is null)
+        {
+            results.Add(new PhoneCheckResult(
+                $"Line {userSlots[0]} assigned user DN",
+                $"DN assigned to {phone.OwnerUserName}",
+                Display(userLine?.Pattern),
+                PhoneCheckStatus.Unresolved,
+                $"CUCM did not return owner '{phone.OwnerUserName}'."));
+        }
+        else if (ownerExtension is null)
+        {
+            results.Add(new PhoneCheckResult(
+                $"Line {userSlots[0]} assigned user DN",
+                $"DN assigned to {phone.OwnerUserName}",
+                Display(userLine?.Pattern),
+                PhoneCheckStatus.Unresolved,
+                $"Owner '{phone.OwnerUserName}' has no four-digit primary extension or LDAP telephone number."));
+        }
+        else
+        {
+            results.Add(EqualsCheck(
+                $"Line {userSlots[0]} assigned user DN",
+                ownerExtension,
+                userLine?.Pattern,
+                $"Assigned user: {phone.OwnerUserName}"));
+        }
+
+        results.AddRange(EvaluateRoomRouting(phone, buildingPatterns, roomSlots[0]));
+        return results;
+    }
+
     internal static IReadOnlyList<PhoneCheckResult> Evaluate(
         PhoneConfigurationProfile profile,
         CucmPhone phone,
