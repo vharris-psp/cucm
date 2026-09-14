@@ -1,10 +1,10 @@
 [submodule "libs/VSharp"]
 	path = libs/VSharp
 	url = https://github.com/vharris-psp/VSharp.git
-	branch = cucm
+	branch = vt/cucm
 	update = checkout
 [submodule "libs/VTModuleSDK"]
 	path = libs/VTModuleSDK
 	url = https://github.com/vharris-psp/VTModuleSDK.git
-	branch = main
+	branch = vt/cucm
 	update = checkout
