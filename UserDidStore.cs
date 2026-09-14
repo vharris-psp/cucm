@@ -15,6 +15,60 @@ internal sealed record UserDidAssignment(
     string? RoutePartitionName,
     DateTimeOffset AssignedAt);
 
+internal sealed record UserDidSelection(UserDid Did, bool UsesInventoryFallback);
+
+internal static class UserDidSelector
+{
+    internal static UserDidSelection Select(
+        IReadOnlyList<UserDid> inventory,
+        string? telephoneNumber,
+        string? userId,
+        string? phoneName = null,
+        int? lineIndex = null,
+        string? primaryExtensionPattern = null,
+        string? primaryExtensionRoutePartitionName = null)
+    {
+        var primaryExtension = UserDidStore.NormalizeUserExtension(primaryExtensionPattern);
+        var assignedExtension = primaryExtension ??
+            UserDidStore.NormalizeUserExtension(telephoneNumber);
+        if (assignedExtension is not null)
+        {
+            var matches = inventory
+                .Where(did => did.Pattern.Equals(assignedExtension, StringComparison.Ordinal))
+                .ToArray();
+            if (matches.Length > 1)
+            {
+                throw new InvalidOperationException(
+                    $"User DN '{assignedExtension}' appears more than once in the local inventory.");
+            }
+            var assignedDid = matches.SingleOrDefault() ??
+                new UserDid(assignedExtension, null, null, null, null);
+            return new UserDidSelection(
+                assignedDid with
+                {
+                    RoutePartitionName = primaryExtension is null
+                        ? assignedDid.RoutePartitionName
+                        : Normalize(primaryExtensionRoutePartitionName) ??
+                            assignedDid.RoutePartitionName,
+                },
+                UsesInventoryFallback: false);
+        }
+
+        var previousSelection = inventory.FirstOrDefault(did =>
+            did.Assignment is { } assignment &&
+            string.Equals(assignment.UserId, userId, StringComparison.OrdinalIgnoreCase) &&
+            (phoneName is null || assignment.PhoneName.Equals(phoneName, StringComparison.OrdinalIgnoreCase)) &&
+            (lineIndex is null || assignment.LineIndex == lineIndex));
+        var available = previousSelection ?? inventory.FirstOrDefault(did => did.Assignment is null) ??
+            throw new InvalidOperationException(
+                $"CUCM user '{userId}' has no assigned four-digit DN and no unused local user DN is available.");
+        return new UserDidSelection(available, UsesInventoryFallback: true);
+    }
+
+    private static string? Normalize(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}
+
 internal sealed class UserDidStore(string dataDirectory)
 {
     private const string Schema = "vt-cucm-user-dids/v1";

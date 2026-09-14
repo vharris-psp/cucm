@@ -20,25 +20,4 @@ public sealed class PhoneConfigurationChecksTests
         Assert.Equal("HS-UserRoom", building.PhoneTemplateName);
     }
 
-    [Fact]
-    public void RequireClassroomPhoneTemplateRequiresUserAndRoomSlots()
-    {
-        var policies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
-            """
-            {
-              "HS-UserRoom": {
-                "slots": [
-                  { "index": 1, "kind": "user" },
-                  { "index": 3, "kind": "room" }
-                ]
-              }
-            }
-            """);
-
-        Assert.Equal(
-            "HS-UserRoom",
-            PhoneConfigurationChecks.RequireClassroomPhoneTemplate("HS-UserRoom", policies));
-        Assert.Throws<InvalidOperationException>(() =>
-            PhoneConfigurationChecks.RequireClassroomPhoneTemplate("Other", policies));
-    }
 }

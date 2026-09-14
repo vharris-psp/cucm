@@ -100,24 +100,6 @@ internal static class PhoneConfigurationChecks
         @"^\?\s*\|\s*(?<raw>.*)$",
         RegexOptions.Singleline);
 
-    internal static string RequireClassroomPhoneTemplate(
-        string? phoneTemplateName,
-        IReadOnlyDictionary<string, TemplateCompliancePolicy> policies)
-    {
-        var normalized = Normalize(phoneTemplateName) ??
-            throw new InvalidOperationException(
-                "The classroom flow requires either the selected building's 'phoneTemplateName' or an " +
-                "existing phone button template.");
-        if (!policies.TryGetValue(normalized, out var policy) ||
-            !policy.Slots.Any(slot => slot.Index == 1 && slot.Kind == TemplateComplianceSlotKind.User) ||
-            !policy.Slots.Any(slot => slot.Index == 3 && slot.Kind == TemplateComplianceSlotKind.Room))
-        {
-            throw new InvalidOperationException(
-                $"Phone button template '{normalized}' must have a 'template-compliance-policies' entry " +
-                "with user slot 1 and room slot 3 before it can be applied by the classroom flow.");
-        }
-        return normalized;
-    }
     internal static PhoneAssignment ResolvePlaceholderAssignment(
         CucmPhone phone,
         string configuration)

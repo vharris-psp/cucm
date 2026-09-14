@@ -5,6 +5,60 @@ public sealed class UserDidStoreTests : IDisposable
         $"cucm-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public void SelectorUsesUsersAssignedDnBeforeUnusedInventory()
+    {
+        var selection = UserDidSelector.Select(
+            [
+                new UserDid("1000", "Users-PT", null, null, null),
+                new UserDid("1205", "Users-PT", "Victor Harris", null, "Default"),
+            ],
+            null,
+            "vharris",
+            primaryExtensionPattern: "1205",
+            primaryExtensionRoutePartitionName: "AllPhones");
+
+        Assert.Equal("1205", selection.Did.Pattern);
+        Assert.Equal("AllPhones", selection.Did.RoutePartitionName);
+        Assert.False(selection.UsesInventoryFallback);
+    }
+
+    [Fact]
+    public void SelectorPrefersPrimaryExtensionOverLdapTelephoneNumber()
+    {
+        var selection = UserDidSelector.Select(
+            [],
+            "2112",
+            "vharris",
+            primaryExtensionPattern: "1205",
+            primaryExtensionRoutePartitionName: "AllPhones");
+
+        Assert.Equal("1205", selection.Did.Pattern);
+        Assert.Equal("AllPhones", selection.Did.RoutePartitionName);
+        Assert.False(selection.UsesInventoryFallback);
+    }
+
+    [Fact]
+    public void SelectorUsesUnusedInventoryOnlyWhenUserHasNoAssignedDn()
+    {
+        var selection = UserDidSelector.Select(
+            [
+                new UserDid(
+                    "1000",
+                    "Users-PT",
+                    null,
+                    null,
+                    null,
+                    new UserDidAssignment("SEPOTHER", 1, "other", "Users-PT", DateTimeOffset.UnixEpoch)),
+                new UserDid("1205", "Users-PT", null, null, "Default"),
+            ],
+            null,
+            "vharris");
+
+        Assert.Equal("1205", selection.Did.Pattern);
+        Assert.True(selection.UsesInventoryFallback);
+    }
+
+    [Fact]
     public async Task MarkAssignedAllowsExactRetryAndRejectsConflictingAssignment()
     {
         var store = new UserDidStore(_directory);

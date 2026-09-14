@@ -42,6 +42,12 @@ return await ModuleApplication
         required: false,
         defaultValue: "{}")
     .Setting(
+        "classroom-room-line-template",
+        "Name of the room-kind line template used by the classroom workflow")
+    .Setting(
+        "classroom-user-line-template",
+        "Name of the user-kind line template used by the classroom workflow")
+    .Setting(
         "phone-check-placeholder",
         "Temporary JSON assignment with userDn, roomNumber, and location",
         required: false,
@@ -1571,6 +1577,27 @@ static async Task<UserDid> RequireAvailableUserDidForUserAsync(
     return did;
 }
 
+static async Task<UserDid> RequireSelectableUserDidForPhoneAsync(
+    ModuleContext context,
+    CucmUser user,
+    string phoneName)
+{
+    var extension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber) ??
+        throw new InvalidOperationException(
+            $"CUCM user '{user.UserId}' does not have a usable four-digit LDAP telephone number.");
+    var did = await FindUserDidAsync(context, extension) ??
+        throw new InvalidOperationException(
+            $"CUCM user '{user.UserId}' maps to DN '{extension}', which is not in the local pool.");
+    if (did.Assignment is { } assignment &&
+        !(assignment.PhoneName.Equals(phoneName, StringComparison.OrdinalIgnoreCase) &&
+          string.Equals(assignment.UserId, user.UserId, StringComparison.OrdinalIgnoreCase)))
+    {
+        throw new InvalidOperationException(
+            $"User DN '{extension}' is already assigned to '{did.Assignment.PhoneName}'.");
+    }
+    return did;
+}
+
 static async Task<CucmUser> RequireUserAsync(
     CucmService cucm,
     string userId,
@@ -1738,7 +1765,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         "apply-classroom",
                         [
                             "Apply classroom template",
-                            "Set building, room number, and user; the rest auto-applies",
+                            "Select a user and room; review every policy-driven change before Save",
                         ],
                         ["phones", "classroom", phoneName]),
                     new ModuleTableRow(
@@ -2292,9 +2319,57 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
         if (context.Arguments is ["classroom", var classroomPhoneName])
         {
             _ = await RequirePhoneAsync(cucm, classroomPhoneName, context.CancellationToken);
+            var classroomDids = await new UserDidStore(context.DataDirectory).LoadAsync(context.CancellationToken);
+            var classroomUserRows = new List<ModuleTableRow>();
+            await foreach (var user in cucm.ListUsersAsync(cancellationToken: context.CancellationToken))
+            {
+                if (string.IsNullOrWhiteSpace(user.UserId))
+                {
+                    continue;
+                }
+                UserDidSelection? selection = null;
+                string status;
+                try
+                {
+                    selection = UserDidSelector.Select(
+                        classroomDids,
+                        user.TelephoneNumber,
+                        user.UserId,
+                        classroomPhoneName,
+                        primaryExtensionPattern: null,
+                        primaryExtensionRoutePartitionName: null);
+                    status = selection.UsesInventoryFallback
+                        ? "Ready (unused DN fallback)"
+                        : "Ready (assigned user DN)";
+                }
+                catch (InvalidOperationException exception)
+                {
+                    status = exception.Message;
+                }
+                classroomUserRows.Add(new ModuleTableRow(
+                    user.UserId,
+                    [Clean(user.UserId), Clean(user.DisplayName), Clean(selection?.Did.Pattern), status],
+                    selection is not null
+                        ? ClassroomWorkflowNavigation.SelectUser(classroomPhoneName, user.UserId)
+                        : null));
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Select a user for {classroomPhoneName}",
+                ["USER ID", "DISPLAY NAME", "USER DN", "STATUS"],
+                classroomUserRows));
+        }
+        if (context.Arguments is
+            ["classroom-user", var classroomUserPhoneName, var classroomUserId])
+        {
+            _ = await RequirePhoneAsync(cucm, classroomUserPhoneName, context.CancellationToken);
+            var user = await RequireUserAsync(cucm, classroomUserId, context.CancellationToken);
+            _ = await SelectUserDidForPhoneAsync(
+                context,
+                user,
+                classroomUserPhoneName);
             var buildingPatterns = RequireBuildingPatterns(context);
             return ModuleCommandResult.Render(new ModuleTableResponse(
-                $"Select a building for {classroomPhoneName}",
+                $"Select a room building for {classroomUserPhoneName}",
                 ["BUILDING", "PARTITION", "DEVICE POOLS"],
                 buildingPatterns
                     .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
@@ -2307,223 +2382,89 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                                 ? "<none>"
                                 : string.Join(", ", pair.Value.DevicePoolNames),
                         ],
-                        ["phones", "classroom-room", classroomPhoneName, pair.Key]))
+                        ClassroomWorkflowNavigation.SelectBuilding(
+                            classroomUserPhoneName,
+                            classroomUserId,
+                            pair.Key)))
                     .ToArray()));
-        }
-        if (context.Arguments is ["classroom-room", var classroomRoomPhoneName, var classroomBuildingCode])
-        {
-            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
-                $"Room number for building {classroomBuildingCode}",
-                "Room number (3 digits)",
-                ["phones", "classroom-user", classroomRoomPhoneName, classroomBuildingCode]));
-        }
-        if (context.Arguments is
-            ["classroom-user", var classroomUserPhoneName, var classroomUserBuildingCode, var classroomRoomNumber])
-        {
-            if (!PhoneConfigurationChecks.IsRoomNumber(classroomRoomNumber))
-            {
-                throw new InvalidOperationException(
-                    $"'{classroomRoomNumber}' is not a valid three-digit room number.");
-            }
-            var classroomDids = await new UserDidStore(context.DataDirectory).LoadAsync(context.CancellationToken);
-            var classroomUserRows = new List<ModuleTableRow>();
-            await foreach (var user in cucm.ListUsersAsync(cancellationToken: context.CancellationToken))
-            {
-                if (string.IsNullOrWhiteSpace(user.UserId))
-                {
-                    continue;
-                }
-                var extension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber);
-                var status = UserDnStatus(user.UserId, extension, classroomDids);
-                var did = extension is null
-                    ? null
-                    : classroomDids.FirstOrDefault(candidate =>
-                        candidate.Pattern.Equals(extension, StringComparison.Ordinal));
-                var canApply = status == "Available" || did?.Assignment is { } assignment &&
-                    assignment.PhoneName.Equals(classroomUserPhoneName, StringComparison.OrdinalIgnoreCase) &&
-                    assignment.LineIndex == 1 &&
-                    string.Equals(assignment.UserId, user.UserId, StringComparison.OrdinalIgnoreCase);
-                classroomUserRows.Add(new ModuleTableRow(
-                    user.UserId,
-                    [Clean(user.UserId), Clean(user.DisplayName), Clean(extension), canApply ? "Ready" : status],
-                    canApply
-                        ? [
-                            "phones", "classroom-review", classroomUserPhoneName, classroomUserBuildingCode,
-                            classroomRoomNumber, user.UserId,
-                          ]
-                        : null));
-            }
-            return ModuleCommandResult.Render(new ModuleTableResponse(
-                $"Select a user for {classroomUserPhoneName}",
-                ["USER ID", "DISPLAY NAME", "USER DN", "STATUS"],
-                classroomUserRows));
         }
         if (context.Arguments is
             [
-                "classroom-review", var classroomReviewPhoneName, var classroomReviewBuildingCode,
-                var classroomReviewRoomNumber, var classroomReviewUserId,
+                "classroom-room", var classroomRoomPhoneName, var classroomRoomUserId,
+                var classroomBuildingCode,
             ])
         {
-            _ = await RequirePhoneAsync(cucm, classroomReviewPhoneName, context.CancellationToken);
-            var buildingPatterns = RequireBuildingPatterns(context);
-            var buildingPattern = RequireBuildingPattern(buildingPatterns, classroomReviewBuildingCode);
-            var devicePoolName = RequireClassroomDevicePool(buildingPattern, classroomReviewBuildingCode);
-            var phone = await RequirePhoneAsync(cucm, classroomReviewPhoneName, context.CancellationToken);
-            var phoneTemplateName = RequireClassroomPhoneTemplate(
-                context, buildingPattern.PhoneTemplateName ?? phone.PhoneTemplateName);
-            var user = await RequireUserAsync(cucm, classroomReviewUserId, context.CancellationToken);
-            var did = await RequireAvailableUserDidForUserAsync(
-                context, user, classroomReviewPhoneName, 1);
-            var existingUserDn = await cucm.GetDirectoryNumberAsync(
-                did.Pattern, did.RoutePartitionName, context.CancellationToken);
-            EnsureUserDidCanBeAssigned(did, existingUserDn);
-            var effectiveUserPartition = Normalize(existingUserDn?.RoutePartitionName) ??
-                Normalize(did.RoutePartitionName);
-            var existingRoomDn = await cucm.GetDirectoryNumberAsync(
-                classroomReviewRoomNumber,
-                buildingPattern.RoutePartitionName,
-                context.CancellationToken);
-            EnsureRoomDidCanBeAssigned(
-                classroomReviewRoomNumber,
-                buildingPattern.RoutePartitionName,
-                existingRoomDn);
+            _ = await RequirePhoneAsync(cucm, classroomRoomPhoneName, context.CancellationToken);
+            var user = await RequireUserAsync(cucm, classroomRoomUserId, context.CancellationToken);
+            _ = await SelectUserDidForPhoneAsync(
+                context,
+                user,
+                classroomRoomPhoneName);
+            _ = RequireBuildingPattern(RequireBuildingPatterns(context), classroomBuildingCode);
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+                $"Room number for building {classroomBuildingCode}",
+                "Room number (3 digits)",
+                ClassroomWorkflowNavigation.ReviewRoom(
+                    classroomRoomPhoneName,
+                    classroomRoomUserId,
+                    classroomBuildingCode)));
+        }
+        if (context.Arguments is
+            [
+                "classroom-review", var classroomReviewPhoneName, var classroomReviewUserId,
+                var classroomReviewBuildingCode, var classroomReviewRoomNumber,
+            ])
+        {
+            var plan = await CreateClassroomPhonePlanAsync(
+                context,
+                cucm,
+                classroomReviewPhoneName,
+                classroomReviewUserId,
+                classroomReviewBuildingCode,
+                classroomReviewRoomNumber);
+            var reviewRows = plan.Changes
+                .Select(change => new ModuleTableRow(
+                    change.Key,
+                    [change.Field, change.Current, change.Target, change.Action]))
+                .Append(new ModuleTableRow(
+                    "save",
+                    ["Save all changes", "Reviewed state", "Apply required operations", "Save"],
+                    ClassroomWorkflowNavigation.Save(plan)))
+                .ToArray();
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Review classroom template for {classroomReviewPhoneName}",
-                ["FIELD", "VALUE"],
-                [
-                    new ModuleTableRow("phone", ["Phone", classroomReviewPhoneName]),
-                    new ModuleTableRow("building", ["Building", classroomReviewBuildingCode]),
-                    new ModuleTableRow("device-pool", ["Device pool", devicePoolName]),
-                    new ModuleTableRow("phone-template", ["Phone button template", phoneTemplateName]),
-                    new ModuleTableRow(
-                        "room",
-                        [
-                            "Room DN",
-                            $"{classroomReviewRoomNumber} ({DisplayPartition(buildingPattern.RoutePartitionName)})",
-                        ]),
-                    new ModuleTableRow(
-                        "user",
-                        [
-                            "User",
-                            $"{user.DisplayName ?? classroomReviewUserId} — {did.Pattern} " +
-                                $"({DisplayPartition(effectiveUserPartition)})",
-                        ]),
-                    new ModuleTableRow(
-                        "submit",
-                        ["Apply", "Sets device pool, both lines (labels/caller ID/voicemail), and description"],
-                        [
-                            "phones", "classroom-apply", classroomReviewPhoneName, classroomReviewBuildingCode,
-                            classroomReviewRoomNumber, classroomReviewUserId,
-                        ]),
-                ],
+                ["FIELD", "CURRENT", "TARGET", "ACTION"],
+                reviewRows,
                 SubmitMode: ModuleTableSubmitMode.Save));
         }
         if (context.Arguments is
             [
-                "classroom-apply", var classroomApplyPhoneName, var classroomApplyBuildingCode,
-                var classroomApplyRoomNumber, var classroomApplyUserId,
+                "classroom-apply", var classroomApplyPhoneName, var classroomApplyUserId,
+                var classroomApplyBuildingCode, var classroomApplyRoomNumber, var reviewedFingerprint,
             ])
         {
-            var phone = await RequirePhoneAsync(cucm, classroomApplyPhoneName, context.CancellationToken);
-            var buildingPatterns = RequireBuildingPatterns(context);
-            var buildingPattern = RequireBuildingPattern(buildingPatterns, classroomApplyBuildingCode);
-            var devicePoolName = RequireClassroomDevicePool(buildingPattern, classroomApplyBuildingCode);
-            var roomTemplate = await RequireLineTemplateAsync(context, "classroom-room");
-            var userTemplate = await RequireLineTemplateAsync(context, "classroom-user");
-            if (roomTemplate.Kind != LineTemplateKind.Room || userTemplate.Kind != LineTemplateKind.User)
+            var plan = await CreateClassroomPhonePlanAsync(
+                context,
+                cucm,
+                classroomApplyPhoneName,
+                classroomApplyUserId,
+                classroomApplyBuildingCode,
+                classroomApplyRoomNumber);
+            if (!plan.Fingerprint.Equals(reviewedFingerprint, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    "The classroom flow requires a room-kind 'classroom-room' template and a " +
-                    "user-kind 'classroom-user' template.");
+                    "The phone, user, room, or configured classroom policy changed after review. " +
+                    "Open the classroom workflow again and review the refreshed plan before saving.");
             }
-            var phoneTemplateName = RequireClassroomPhoneTemplate(
-                context, buildingPattern.PhoneTemplateName ?? phone.PhoneTemplateName);
-            var user = await RequireUserAsync(cucm, classroomApplyUserId, context.CancellationToken);
-            var did = await RequireAvailableUserDidForUserAsync(
-                context, user, classroomApplyPhoneName, 1);
-            var userExistingDn = await cucm.GetDirectoryNumberAsync(
-                did.Pattern, did.RoutePartitionName, context.CancellationToken);
-            EnsureUserDidCanBeAssigned(did, userExistingDn);
-            var effectiveUserPartition = Normalize(userExistingDn?.RoutePartitionName) ??
-                Normalize(did.RoutePartitionName);
-            var roomExistingDn = await cucm.GetDirectoryNumberAsync(
-                classroomApplyRoomNumber,
-                buildingPattern.RoutePartitionName,
+            var result = await ClassroomPhoneExecutor.ExecuteAsync(
+                plan,
+                new CucmClassroomPhoneWriter(
+                    cucm,
+                    new UserDidStore(context.DataDirectory)),
                 context.CancellationToken);
-            EnsureRoomDidCanBeAssigned(
-                classroomApplyRoomNumber,
-                buildingPattern.RoutePartitionName,
-                roomExistingDn);
-
-            if (!string.Equals(phone.DevicePoolName, devicePoolName, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(phone.PhoneTemplateName, phoneTemplateName, StringComparison.OrdinalIgnoreCase))
-            {
-                await cucm.UpdatePhoneAsync(
-                    classroomApplyPhoneName, null, devicePoolName, null, context.CancellationToken,
-                    phoneTemplateName);
-            }
-
-            // School convention: line 1 carries the assigned user's DN, line 3 the shared room DN.
-            await ApplyClassroomLineAsync(
-                context, cucm, roomTemplate, phone, classroomApplyPhoneName, 3,
-                classroomApplyRoomNumber, buildingPattern.RoutePartitionName, devicePoolName,
-                room: classroomApplyRoomNumber, building: classroomApplyBuildingCode,
-                ownerUserId: null, userDisplayName: null);
-
-            var previousOwnerUserId = Normalize(phone.OwnerUserName);
-            var previousDevices = user.AssociatedDevices.ToArray();
-            var addAssociation = !previousDevices.Contains(
-                classroomApplyPhoneName, StringComparer.OrdinalIgnoreCase);
-            if (userExistingDn is null)
-            {
-                await cucm.AddDirectoryNumberAsync(
-                    new CucmDirectoryNumberCreateRequest(
-                        did.Pattern, effectiveUserPartition, did.Description,
-                        did.CallingSearchSpaceName, did.VoiceMailProfileName),
-                    context.CancellationToken);
-            }
-            if (addAssociation)
-            {
-                await cucm.UpdateUserAssociatedDevicesAsync(
-                    classroomApplyUserId, previousDevices.Append(classroomApplyPhoneName), context.CancellationToken);
-            }
-            await cucm.AssignPhoneLineDirectoryNumberToUserAsync(
-                classroomApplyPhoneName, 1, did.Pattern, effectiveUserPartition, classroomApplyUserId,
-                context.CancellationToken);
-            var classroomWarnings = new List<string>();
-            if (previousOwnerUserId is not null &&
-                !previousOwnerUserId.Equals(classroomApplyUserId, StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    await RemovePhoneFromPreviousOwnerAsync(
-                        cucm, previousOwnerUserId, classroomApplyPhoneName, context.CancellationToken);
-                }
-                catch (Exception cleanupException)
-                {
-                    classroomWarnings.Add(
-                        $"could not remove '{classroomApplyPhoneName}' from previous owner " +
-                        $"'{previousOwnerUserId}' associated devices: {cleanupException.Message}");
-                }
-            }
-            await ApplyClassroomLineAsync(
-                context, cucm, userTemplate, phone, classroomApplyPhoneName, 1,
-                did.Pattern, effectiveUserPartition, devicePoolName,
-                room: null, building: null,
-                ownerUserId: classroomApplyUserId, userDisplayName: user.DisplayName);
-
-            var classroomComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
-                context, cucm, classroomApplyPhoneName, null, context.CancellationToken);
-            await new UserDidStore(context.DataDirectory).MarkAssignedAsync(
-                did.Pattern, did.RoutePartitionName, classroomApplyPhoneName, 1, classroomApplyUserId,
-                effectiveUserPartition, context.CancellationToken);
             return ModuleCommandResult.Ok(
-                $"Applied classroom template to {classroomApplyPhoneName}: device pool '{devicePoolName}', " +
-                $"room DN '{classroomApplyRoomNumber}', user '{classroomApplyUserId}' ({did.Pattern}). " +
-                $"Description: '{classroomComposedDescription}'." +
-                (classroomWarnings.Count == 0
-                    ? string.Empty
-                    : " WARNING: " + string.Join(" ", classroomWarnings)));
+                $"Saved the reviewed classroom configuration. Applied {result.CompletedOperations.Count} " +
+                "required operation(s); unchanged values were skipped.");
         }
         if (context.Arguments is
             ["remove-line-review", var phoneNameForRemoveReview, var removeReviewIndexText] &&
@@ -3638,96 +3579,96 @@ static async Task<IReadOnlyDictionary<string, LineTemplate>> LoadLineTemplatesAs
     return merged;
 }
 
-// The classroom template needs one unambiguous device pool per building; multi-pool buildings
-// aren't supported by this flow yet.
-static string RequireClassroomDevicePool(BuildingPattern buildingPattern, string buildingCode) =>
-    buildingPattern.DevicePoolNames.Count == 1
-        ? buildingPattern.DevicePoolNames[0]
-        : throw new InvalidOperationException(
-            $"Building '{buildingCode}' must list exactly one device pool in 'building-patterns' to " +
-            "use the classroom template.");
-
-static string RequireClassroomPhoneTemplate(ModuleContext context, string? phoneTemplateName)
-    => PhoneConfigurationChecks.RequireClassroomPhoneTemplate(
-        phoneTemplateName,
-        PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
-            context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}"));
-
-// Creates the line's DN if missing (using the template's voicemail profile), assigns it, then
-// applies alerting name/voicemail/caller ID/label/external mask from the template's substituted tokens.
-static async Task ApplyClassroomLineAsync(
+static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
     ModuleContext context,
     CucmService cucm,
-    LineTemplate template,
-    VSharp.Cucm.Models.CucmPhone phone,
     string phoneName,
-    int lineIndex,
-    string pattern,
-    string? routePartitionName,
-    string devicePoolName,
-    string? room,
-    string? building,
-    string? ownerUserId,
-    string? userDisplayName)
+    string userId,
+    string buildingCode,
+    string roomNumber)
 {
-    string? Substitute(string? value) => Normalize(PhoneConfigurationChecks.SubstituteLineTemplateTokens(
-        value, room, building, pattern, phoneName, lineIndex.ToString(), devicePoolName,
-        userDisplayName, ownerUserId));
+    var buildingPatterns = RequireBuildingPatterns(context);
+    var buildingPattern = RequireBuildingPattern(buildingPatterns, buildingCode);
+    var compliancePolicies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
+        context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");
+    var phone = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);
+    var layout = ClassroomPhonePlanner.ResolveTemplateLayout(
+        buildingPattern.PhoneTemplateName ?? phone.PhoneTemplateName,
+        compliancePolicies);
+    var user = await RequireUserAsync(cucm, userId, context.CancellationToken);
+    var userDidSelection = await SelectUserDidForPhoneAsync(
+        context,
+        user,
+        phoneName,
+        layout.UserLineIndex);
+    var userDirectoryNumber = await cucm.GetDirectoryNumberAsync(
+        userDidSelection.Did.Pattern,
+        userDidSelection.Did.RoutePartitionName,
+        context.CancellationToken);
+    var userDid = userDidSelection.Did with
+    {
+        RoutePartitionName = userDirectoryNumber?.RoutePartitionName ??
+            userDidSelection.Did.RoutePartitionName ??
+            Normalize(context.Configuration.GetValueOrDefault("user-did-partition")),
+        Description = userDirectoryNumber?.Description ?? userDidSelection.Did.Description ??
+            $"{context.Configuration.GetValueOrDefault("user-did-description-prefix") ?? "User DID"} " +
+            userDidSelection.Did.Pattern,
+        CallingSearchSpaceName = userDirectoryNumber?.CallingSearchSpaceName ??
+            userDidSelection.Did.CallingSearchSpaceName ??
+            Normalize(context.Configuration.GetValueOrDefault("user-did-css")),
+        VoiceMailProfileName = userDirectoryNumber?.VoiceMailProfileName ??
+            userDidSelection.Did.VoiceMailProfileName ??
+            Normalize(context.Configuration.GetValueOrDefault("user-did-voicemail-profile")),
+    };
+    var roomDirectoryNumber = await cucm.GetDirectoryNumberAsync(
+        roomNumber,
+        buildingPattern.RoutePartitionName,
+        context.CancellationToken);
+    var previousOwnerUserId = Normalize(phone.OwnerUserName);
+    var previousOwner = previousOwnerUserId is not null &&
+        !previousOwnerUserId.Equals(userId, StringComparison.OrdinalIgnoreCase)
+        ? await cucm.GetUserAsync(previousOwnerUserId, context.CancellationToken)
+        : null;
+    var roomTemplateName = RequireConfigurationValue(context, "classroom-room-line-template");
+    var userTemplateName = RequireConfigurationValue(context, "classroom-user-line-template");
+    var roomTemplate = await RequireLineTemplateAsync(context, roomTemplateName);
+    var userTemplate = await RequireLineTemplateAsync(context, userTemplateName);
 
-    var alertingName = Substitute(template.AlertingName);
-    var display = Substitute(template.Display);
-    var label = Substitute(template.Label);
-    var externalMask = Substitute(template.ExternalPhoneNumberMask);
-    var voiceMailProfileName = Substitute(template.VoiceMailProfileName);
+    return ClassroomPhonePlanner.Create(new ClassroomPhonePlanInput(
+        phone,
+        user,
+        userDid,
+        userDidSelection.UsesInventoryFallback,
+        userDirectoryNumber,
+        roomDirectoryNumber,
+        previousOwner,
+        buildingPatterns,
+        compliancePolicies,
+        buildingCode,
+        roomNumber,
+        roomTemplate,
+        userTemplate));
+}
 
-    var existing = await cucm.GetDirectoryNumberAsync(pattern, routePartitionName, context.CancellationToken);
-    if (existing is null)
-    {
-        await cucm.AddDirectoryNumberAsync(
-            new CucmDirectoryNumberCreateRequest(
-                pattern,
-                routePartitionName,
-                alertingName ?? label ?? $"{pattern} ({DisplayPartition(routePartitionName)})",
-                VoiceMailProfileName: voiceMailProfileName),
-            context.CancellationToken);
-    }
+static string RequireConfigurationValue(ModuleContext context, string key) =>
+    ClassroomConfiguration.RequireValue(context.Configuration, key);
 
-    var lineExisted = phone.Lines.Any(line => line.Index == lineIndex);
-    try
-    {
-        await cucm.AssignPhoneLineDirectoryNumberAsync(
-            phoneName, lineIndex, pattern, routePartitionName, context.CancellationToken);
-    }
-    catch (Exception assignException) when (!lineExisted)
-    {
-        throw new InvalidOperationException(
-            $"Could not add a new line at index {lineIndex} on '{phoneName}'. This phone's button " +
-            $"template ('{Clean(phone.PhoneTemplateName)}') may not define a Line-type button at that " +
-            "position. Change the phone's button template via 'phones edit' to one with more line " +
-            $"positions, then retry. CUCM error: {assignException.Message}",
-            assignException);
-    }
-    if (alertingName is not null || voiceMailProfileName is not null)
-    {
-        await cucm.UpdateDirectoryNumberAsync(
-            new CucmDirectoryNumberUpdateRequest(
-                pattern, routePartitionName,
-                AlertingName: alertingName,
-                VoiceMailProfileName: voiceMailProfileName),
-            context.CancellationToken);
-    }
-    if (display is not null)
-    {
-        await cucm.UpdatePhoneLineDisplayAsync(phoneName, lineIndex, display, display, context.CancellationToken);
-    }
-    if (label is not null)
-    {
-        await cucm.UpdatePhoneLineLabelAsync(phoneName, lineIndex, label, context.CancellationToken);
-    }
-    if (externalMask is not null)
-    {
-        await cucm.UpdatePhoneLineExternalMaskAsync(phoneName, lineIndex, externalMask, context.CancellationToken);
-    }
+static async Task<UserDidSelection> SelectUserDidForPhoneAsync(
+    ModuleContext context,
+    CucmUser user,
+    string phoneName,
+    int? lineIndex = null)
+{
+    var inventory = await new UserDidStore(context.DataDirectory)
+        .LoadAsync(context.CancellationToken);
+    return UserDidSelector.Select(
+        inventory,
+        user.TelephoneNumber,
+        user.UserId,
+        phoneName,
+        lineIndex,
+        null,
+        null);
 }
 
 // For "user" kind templates: prompts for an owner (if the template calls for one), otherwise
