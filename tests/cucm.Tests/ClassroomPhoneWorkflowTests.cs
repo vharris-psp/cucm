@@ -27,6 +27,12 @@ public sealed class ClassroomPhoneWorkflowTests
         var plan = CreatePlan();
 
         Assert.Equal(
+            ["phones", "template", "SEP0001"],
+            ClassroomWorkflowNavigation.SelectTemplate("SEP0001"));
+        Assert.Equal(
+            ["phones", "classroom", "SEP0001"],
+            ClassroomWorkflowNavigation.Apply("SEP0001"));
+        Assert.Equal(
             ["phones", "classroom-user", "SEP0001", "alice"],
             ClassroomWorkflowNavigation.SelectUser("SEP0001", "alice"));
         Assert.Equal(
@@ -92,6 +98,55 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.Equal("HS-Classroom", devicePoolChange.Target);
         Assert.Equal("Update", devicePoolChange.Action);
         Assert.Equal("HS-Rooms", plan.RoomLine.RoutePartitionName);
+    }
+
+    [Fact]
+    public void PlannerBuildsRoomIdentityFromEachSelectedLocation()
+    {
+        var highSchoolInput = CreateInput();
+        var buildingPatterns = new Dictionary<string, BuildingPattern>(
+            highSchoolInput.BuildingPatterns,
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["MS"] = new BuildingPattern(
+                "MS-Rooms",
+                ["MS-Legacy"],
+                "MS-UserRoom",
+                "MS-Classroom"),
+        };
+        var policies = new Dictionary<string, TemplateCompliancePolicy>(
+            highSchoolInput.CompliancePolicies,
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["MS-UserRoom"] = new TemplateCompliancePolicy(
+                [
+                    new TemplateComplianceSlot(2, TemplateComplianceSlotKind.User),
+                    new TemplateComplianceSlot(4, TemplateComplianceSlotKind.Room),
+                ]),
+        };
+
+        var highSchool = ClassroomPhonePlanner.Create(highSchoolInput with
+        {
+            BuildingPatterns = buildingPatterns,
+            CompliancePolicies = policies,
+        });
+        var middleSchool = ClassroomPhonePlanner.Create(highSchoolInput with
+        {
+            BuildingPatterns = buildingPatterns,
+            CompliancePolicies = policies,
+            BuildingCode = "MS",
+        });
+
+        Assert.Equal("HS-Rooms", highSchool.RoomLine.RoutePartitionName);
+        Assert.Equal("HS Room 130", highSchool.RoomLine.Label);
+        Assert.Equal("HS Room 130", highSchool.RoomLine.Display);
+        Assert.Equal("HS Room 130", highSchool.RoomLine.AlertingName);
+        Assert.Equal("HS Room 130", highSchool.RoomLine.Description);
+        Assert.Equal("MS-Rooms", middleSchool.RoomLine.RoutePartitionName);
+        Assert.Equal("MS Room 130", middleSchool.RoomLine.Label);
+        Assert.Equal("MS Room 130", middleSchool.RoomLine.Display);
+        Assert.Equal("MS Room 130", middleSchool.RoomLine.AlertingName);
+        Assert.Equal("MS Room 130", middleSchool.RoomLine.Description);
     }
 
     [Fact]

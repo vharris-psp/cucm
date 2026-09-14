@@ -18,6 +18,12 @@ internal static class ClassroomConfiguration
 
 internal static class ClassroomWorkflowNavigation
 {
+    internal static IReadOnlyList<string> SelectTemplate(string phoneName) =>
+        ["phones", "template", phoneName];
+
+    internal static IReadOnlyList<string> Apply(string phoneName) =>
+        ["phones", "classroom", phoneName];
+
     internal static IReadOnlyList<string> SelectUser(string phoneName, string userId) =>
         ["phones", "classroom-user", phoneName, userId];
 
@@ -183,6 +189,7 @@ internal static class ClassroomPhonePlanner
             buildingPattern.PhoneTemplateName ?? input.Phone.PhoneTemplateName,
             input.CompliancePolicies);
         ValidateLineTemplates(input.RoomTemplate, input.UserTemplate);
+        var roomTemplate = CreateClassroomRoomTemplate(input.RoomTemplate);
 
         EnsureRoomDirectoryNumberCanBeAssigned(
             input.RoomNumber,
@@ -203,7 +210,7 @@ internal static class ClassroomPhonePlanner
                 .Where(part => !string.IsNullOrWhiteSpace(part))));
         var roomLine = CreateLinePlan(
             "Room",
-            input.RoomTemplate,
+            roomTemplate,
             input.Phone,
             input.RoomDirectoryNumber,
             layout.RoomLineIndex,
@@ -212,7 +219,7 @@ internal static class ClassroomPhonePlanner
             devicePoolName,
             input.RoomNumber,
             input.BuildingCode,
-            $"Room {input.RoomNumber} ({input.BuildingCode})",
+            $"{input.BuildingCode} Room {input.RoomNumber}",
             callingSearchSpaceName: null,
             ownerUserId: null,
             userDisplayName: null);
@@ -518,6 +525,13 @@ internal static class ClassroomPhonePlanner
                 "The configured classroom user line template must set 'associateEndUser' to true.");
         }
     }
+
+    private static LineTemplate CreateClassroomRoomTemplate(LineTemplate defaults) => defaults with
+    {
+        AlertingName = "{building} Room {room}",
+        Display = "{building} Room {room}",
+        Label = "{building} Room {room}",
+    };
 
     private static void EnsureRoomDirectoryNumberCanBeAssigned(
         string roomNumber,

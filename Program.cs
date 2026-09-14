@@ -44,7 +44,8 @@ return await ModuleApplication
         defaultValue: "{}")
     .Setting(
         "classroom-room-line-template",
-        "Name of the room-kind line template used by the classroom workflow")
+        "Name of the room-kind line template supplying shared external-mask and voicemail defaults; " +
+            "the classroom workflow derives room identity from the selected location")
     .Setting(
         "classroom-user-line-template",
         "Name of the user-kind line template used by the classroom workflow")
@@ -1763,16 +1764,33 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         ["Check configuration", "Validate this phone against a named profile"],
                         ["phones", "check", phoneName]),
                     new ModuleTableRow(
-                        "apply-classroom",
+                        "apply-template",
                         [
-                            "Apply classroom template",
-                            "Select a user and room; review every policy-driven change before Save",
+                            "Apply template",
+                            "Select a phone template and provide its required values",
                         ],
-                        ["phones", "classroom", phoneName]),
+                        ClassroomWorkflowNavigation.SelectTemplate(phoneName)),
                     new ModuleTableRow(
                         "edit",
                         ["Edit", "Update description, device pool, and owner"],
                         ["phones", "edit", phoneName]),
+                ]));
+        }
+        if (context.Arguments is ["template", var templatePhoneName])
+        {
+            _ = await RequirePhoneAsync(cucm, templatePhoneName, context.CancellationToken);
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Select a template for {templatePhoneName}",
+                ["TEMPLATE", "REQUIRED VALUES", "RESULT"],
+                [
+                    new ModuleTableRow(
+                        "classroom",
+                        [
+                            "Classroom",
+                            "User, location, room number",
+                            "Applies the location profile, user DN, and room DN",
+                        ],
+                        ClassroomWorkflowNavigation.Apply(templatePhoneName)),
                 ]));
         }
         if (context.Arguments is ["assign-slot", var phoneNameForSlot])
