@@ -26,7 +26,8 @@ internal static class UserDidSelector
         string? phoneName = null,
         int? lineIndex = null,
         string? primaryExtensionPattern = null,
-        string? primaryExtensionRoutePartitionName = null)
+        string? primaryExtensionRoutePartitionName = null,
+        bool allowInventoryFallback = true)
     {
         var primaryExtension = UserDidStore.NormalizeUserExtension(primaryExtensionPattern);
         var assignedExtension = primaryExtension ??
@@ -53,6 +54,12 @@ internal static class UserDidSelector
                 },
                 UsesInventoryFallback: false);
         }
+
+            if (!allowInventoryFallback)
+            {
+                throw new InvalidOperationException(
+                $"CUCM user '{userId}' has no assigned four-digit primary extension or LDAP telephone number.");
+            }
 
         var previousSelection = inventory.FirstOrDefault(did =>
             did.Assignment is { } assignment &&

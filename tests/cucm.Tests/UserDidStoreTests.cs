@@ -59,6 +59,18 @@ public sealed class UserDidStoreTests : IDisposable
     }
 
     [Fact]
+    public void SelectorCanRequireAnAssignedUserDnWithoutAllocatingInventory()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() => UserDidSelector.Select(
+            [new UserDid("1205", "Users-PT", null, null, "Default")],
+            null,
+            "vharris",
+            allowInventoryFallback: false));
+
+        Assert.Contains("primary extension or LDAP telephone number", exception.Message);
+    }
+
+    [Fact]
     public async Task MarkAssignedAllowsExactRetryAndRejectsConflictingAssignment()
     {
         var store = new UserDidStore(_directory);

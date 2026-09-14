@@ -3667,8 +3667,9 @@ static async Task<UserDidSelection> SelectUserDidForPhoneAsync(
         user.UserId,
         phoneName,
         lineIndex,
-        null,
-        null);
+        user.PrimaryExtension?.Pattern,
+        user.PrimaryExtension?.RoutePartitionName,
+        allowInventoryFallback: false);
 }
 
 // For "user" kind templates: prompts for an owner (if the template calls for one), otherwise
