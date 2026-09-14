@@ -1,4 +1,4 @@
-version: "0.8.5"
+version: "0.8.6"
 vt_version: "1.4.3"
 project_file: "cucm.csproj"
 dependencies: []
