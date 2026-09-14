@@ -11,7 +11,7 @@ return await ModuleApplication
     .Setting("axl-version", "CUCM AXL schema version", defaultValue: "15.0")
     .Setting(
         "trusted-certificate",
-        "Path to a PEM certificate trusted for CUCM AXL",
+        "Absolute or ~/... path to a PEM certificate trusted for CUCM AXL; omit to use system trust",
         required: false)
     .Setting(
         "room-partitions",
@@ -4630,9 +4630,9 @@ static async Task<CucmService> CreateCucmAsync(ModuleContext context)
         throw new InvalidOperationException("CUCM setting 'port' must be between 1 and 65535.");
     }
     var certificatePath = context.Configuration.GetValueOrDefault("trusted-certificate");
-    var certificate = string.IsNullOrWhiteSpace(certificatePath)
-        ? null
-        : await File.ReadAllTextAsync(certificatePath, context.CancellationToken);
+    var certificate = await TrustedCertificateLoader.LoadAsync(
+        certificatePath,
+        context.CancellationToken);
     var endpoint = new UriBuilder(Uri.UriSchemeHttps, publisher, port, "axl/").Uri.ToString();
     return new CucmService(new CucmServiceConfig(
         endpoint,

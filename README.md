@@ -2,6 +2,16 @@
 
 Run `vt cucm` with no subcommand to open the centralized home menu (users, phones, directory numbers, the local DID inventory, phone provisioning, and export) — the same menu is discoverable via `--help` and `--vt-module-describe` as this module's default command.
 
+## Trusted CUCM certificate
+
+Configure `trusted-certificate` with `vt module configure cucm` when CUCM AXL uses a CA certificate that is not available from system trust. Leaving the setting empty continues to use system trust. Absolute paths remain supported, and a standalone leading `~` expands to the home directory of the user running the module. The recommended per-user location is:
+
+```text
+~/.vt/modules/cucm/data/trusted-ca.pem
+```
+
+The setting does not perform shell expansion or environment-variable expansion. Named-user forms such as `~other/trusted-ca.pem` are rejected; use an absolute path when the certificate belongs outside the runtime user's home directory.
+
 ## User DN inventory
 
 The module keeps an approved inventory of four-digit user directory numbers in its private VT data directory:
