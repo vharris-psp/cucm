@@ -70,6 +70,16 @@ return await ModuleApplication
         "Description prefix used when creating user DIDs",
         required: false,
         defaultValue: "User DID")
+    .Setting(
+        "user-did-scan-partitions",
+        "Comma-separated CUCM route partition names (e.g. 'AllPhones') to scan when reconciling " +
+            "the tracked local DID inventory against numbers actually configured in CUCM. Powers " +
+            "'dids list' and 'dids available' and guards live assignment so a DID already in use " +
+            "or reserved by function is never handed out. The tracked inventory always remains " +
+            "authoritative for which numbers are valid DIDs; CUCM is only trusted for usage status. " +
+            "Without this setting, DID commands fall back to the local inventory's recorded " +
+            "assignments only.",
+        required: false)
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
     .Default(
@@ -363,7 +373,7 @@ static async ValueTask<ModuleCommandOutcome> ProvisionAsync(ModuleContext contex
                 throw new InvalidOperationException("Provisioning state is missing a user ID.");
 
             var user = await RequireUserAsync(cucm, createUserId, context.CancellationToken);
-            var did = await RequireAvailableUserDidAsync(context, createPattern, createPartition);
+            var did = await RequireAvailableUserDidAsync(context, cucm, createPattern, createPartition);
             var previousOwnerUserId = createState.PreviousOwnerUserName;
             var replacingOwner = previousOwnerUserId is not null &&
                 !previousOwnerUserId.Equals(createUserId, StringComparison.OrdinalIgnoreCase);
@@ -1400,6 +1410,7 @@ static async ValueTask<ModuleCommandOutcome> UsersAsync(ModuleContext context)
             var user = await RequireUserAsync(cucm, assignmentUserId, context.CancellationToken);
             var did = await RequireAvailableUserDidAsync(
                 context,
+                cucm,
                 assignmentPattern,
                 inventoryPartition);
             if (!string.Equals(
@@ -1870,6 +1881,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                     "'phones edit' to one with more line positions, then retry.";
             return ModuleCommandResult.Render(await CreateAvailableUserDidsResponseAsync(
                 context,
+                cucm,
                 phoneNameForSlotSelection,
                 slotIndex,
                 note));
@@ -2113,7 +2125,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             int.TryParse(didIndexText, out var didIndex) && didIndex > 0)
         {
             return ModuleCommandResult.Render(
-                await CreateAvailableUserDidsResponseAsync(context, phoneNameForDids, didIndex));
+                await CreateAvailableUserDidsResponseAsync(context, cucm, phoneNameForDids, didIndex));
         }
         if (context.Arguments is
             ["did-review", var phoneNameForDidReview, var reviewIndexText, var reviewPattern, var reviewPartition] &&
@@ -2126,6 +2138,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             var line = phone.Lines.FirstOrDefault(candidate => candidate.Index == reviewIndex);
             var did = await RequireAvailableUserDidAsync(
                 context,
+                cucm,
                 reviewPattern,
                 reviewPartition);
             var existing = await cucm.GetDirectoryNumberAsync(
@@ -2168,6 +2181,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 context.CancellationToken);
             var did = await RequireAvailableUserDidAsync(
                 context,
+                cucm,
                 assignmentPattern,
                 inventoryPartition);
             var existing = await cucm.GetDirectoryNumberAsync(
@@ -3350,14 +3364,12 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
 
 static async Task<ModuleResponse> CreateAvailableUserDidsResponseAsync(
     ModuleContext context,
+    CucmService cucm,
     string phoneName,
     int lineIndex,
     string? note = null)
 {
-    var available = (await new UserDidStore(context.DataDirectory)
-        .LoadAsync(context.CancellationToken))
-        .Where(did => did.Assignment is null)
-        .ToArray();
+    var available = await LoadAvailableUserDidsAsync(context, cucm);
     var rows = available.Select(did => new ModuleTableRow(
         $"{did.Pattern}:{did.RoutePartitionName}",
         [
@@ -3382,6 +3394,25 @@ static async Task<ModuleResponse> CreateAvailableUserDidsResponseAsync(
         rows);
 }
 
+// Live-reconciles against CUCM's configured DID scan partition(s) when 'user-did-scan-partitions'
+// is set, so a DID already in use or reserved by function is never offered; otherwise falls back
+// to the local inventory's recorded assignments only.
+static async Task<IReadOnlyList<UserDid>> LoadAvailableUserDidsAsync(
+    ModuleContext context,
+    CucmService cucm)
+{
+    var dids = await new UserDidStore(context.DataDirectory).LoadAsync(context.CancellationToken);
+    var scanPartitions = UserDidReconciler.ParsePartitions(
+        context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+    if (scanPartitions.Count == 0)
+    {
+        return dids.Where(did => did.Assignment is null).ToArray();
+    }
+    var reconciliation = await UserDidReconciler.ResolveFromCucmAsync(
+        cucm, dids, scanPartitions, context.CancellationToken);
+    return reconciliation.Available.ToArray();
+}
+
 static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context)
 {
     try
@@ -3395,8 +3426,12 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                 [
                     new ModuleTableRow(
                         "list",
-                        ["List", "Browse available and assigned user DNs"],
+                        ["List", "Browse the tracked inventory reconciled against live CUCM usage"],
                         ["dids", "list"]),
+                    new ModuleTableRow(
+                        "available",
+                        ["Available", "List tracked DNs not currently used anywhere in CUCM"],
+                        ["dids", "available"]),
                     new ModuleTableRow(
                         "add",
                         ["Add", "Import comma-separated four-digit DNs or a numeric start..end range"],
@@ -3410,22 +3445,70 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
         if (context.Arguments is ["list"])
         {
             var dids = await store.LoadAsync(context.CancellationToken);
-            return ModuleCommandResult.Render(new ModuleTableResponse(
-                "Local user DN inventory",
-                ["DID", "PARTITION", "STATUS", "USER", "PHONE", "SLOT"],
-                dids.Select(did => new ModuleTableRow(
-                    $"{did.Pattern}:{did.RoutePartitionName}",
+            var scanPartitions = UserDidReconciler.ParsePartitions(
+                context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+            if (scanPartitions.Count == 0)
+            {
+                return ModuleCommandResult.Render(new ModuleTableResponse(
+                    "Local user DN inventory (configure 'user-did-scan-partitions' to reconcile " +
+                        "against live CUCM usage)",
+                    ["DID", "PARTITION", "STATUS", "USER", "PHONE", "SLOT"],
+                    dids.Select(did => new ModuleTableRow(
+                        $"{did.Pattern}:{did.RoutePartitionName}",
+                        [
+                            did.Pattern,
+                            DisplayPartition(
+                                did.Assignment?.RoutePartitionName ?? did.RoutePartitionName),
+                            did.Assignment is null ? "AVAILABLE" : "ASSIGNED",
+                            Clean(did.Assignment?.UserId),
+                            Clean(did.Assignment?.PhoneName),
+                            did.Assignment?.LineIndex.ToString() ?? string.Empty,
+                        ])).ToArray(),
+                    Selectable: false));
+            }
+
+            using var cucm = await CreateCucmAsync(context);
+            var reconciliation = await UserDidReconciler.ResolveFromCucmAsync(
+                cucm, dids, scanPartitions, context.CancellationToken);
+            var rows = reconciliation.Tracked
+                .Select(entry => new ModuleTableRow(
+                    $"{entry.Did.Pattern}:{entry.Did.RoutePartitionName}",
                     [
-                        did.Pattern,
-                        DisplayPartition(
-                            did.Assignment?.RoutePartitionName ?? did.RoutePartitionName),
-                        did.Assignment is null ? "Available" : "Assigned",
-                        Clean(did.Assignment?.UserId),
-                        Clean(did.Assignment?.PhoneName),
-                        did.Assignment?.LineIndex.ToString() ?? string.Empty,
-                    ])).ToArray(),
+                        entry.Did.Pattern,
+                        DisplayPartition(entry.Did.RoutePartitionName),
+                        DisplayLiveStatus(entry.Status),
+                        entry.Reason,
+                    ]))
+                .Concat(reconciliation.Untracked.Select(anomaly => new ModuleTableRow(
+                    $"untracked:{anomaly.Pattern}:{anomaly.RoutePartitionName}",
+                    [
+                        anomaly.Pattern,
+                        DisplayPartition(anomaly.RoutePartitionName),
+                        DisplayLiveStatus(UserDidLiveStatus.Anomaly),
+                        anomaly.Reason,
+                    ])))
+                .ToArray();
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Local user DN inventory, reconciled against CUCM partition(s) " +
+                    $"{string.Join(", ", scanPartitions)}",
+                ["DID", "PARTITION", "STATUS", "REASON"],
+                rows,
                 Selectable: false));
         }
+        if (context.Arguments is ["available"])
+        {
+            using var cucm = await CreateCucmAsync(context);
+            var available = await LoadAvailableUserDidsAsync(context, cucm);
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                "User DNs available for assignment (not currently used anywhere in CUCM)",
+                ["DID", "PARTITION", "DESCRIPTION"],
+                available.Select(did => new ModuleTableRow(
+                    $"{did.Pattern}:{did.RoutePartitionName}",
+                    [did.Pattern, DisplayPartition(did.RoutePartitionName), Clean(did.Description)]))
+                    .ToArray(),
+                Selectable: false));
+        }
+
         if (context.Arguments is ["add"])
         {
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
@@ -3490,7 +3573,7 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
         }
 
         return ModuleCommandResult.Fail(
-            "Usage: vt cucm dids [list|add [<dn,dn|start..end>]|replace]",
+            "Usage: vt cucm dids [list|available|add [<dn,dn|start..end>]|replace]",
             exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
@@ -3499,8 +3582,17 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
     }
 }
 
+static string DisplayLiveStatus(UserDidLiveStatus status) => status switch
+{
+    UserDidLiveStatus.Available => "AVAILABLE",
+    UserDidLiveStatus.Reserved => "RESERVED",
+    UserDidLiveStatus.Anomaly => "ANOMALY",
+    _ => status.ToString().ToUpperInvariant(),
+};
+
 static async Task<UserDid> RequireAvailableUserDidAsync(
     ModuleContext context,
+    CucmService cucm,
     string pattern,
     string routePartitionName)
 {
@@ -3509,13 +3601,47 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
         .FirstOrDefault(candidate =>
             candidate.Pattern.Equals(pattern, StringComparison.Ordinal) &&
             string.Equals(candidate.RoutePartitionName, partition, StringComparison.Ordinal));
-    return did is null
-        ? throw new InvalidOperationException(
-            $"User DN '{pattern}' is not present in the local inventory.")
-        : did.Assignment is not null
-            ? throw new InvalidOperationException($"User DN '{pattern}' is no longer available.")
-            : did;
+    if (did is null)
+    {
+        throw new InvalidOperationException($"User DN '{pattern}' is not present in the local inventory.");
+    }
+    if (did.Assignment is not null)
+    {
+        throw new InvalidOperationException($"User DN '{pattern}' is no longer available.");
+    }
+
+    // Guard against handing out a DID that CUCM shows is already in use or reserved by function,
+    // even though nothing in this tool's own bookkeeping recorded that assignment.
+    var scanPartitions = UserDidReconciler.ParsePartitions(
+        context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+    if (scanPartitions.Count > 0)
+    {
+        IReadOnlyList<string> candidatePartitions = did.RoutePartitionName is { } didPartition
+            ? [didPartition]
+            : scanPartitions;
+        CucmDirectoryNumber? existing = null;
+        foreach (var candidatePartition in candidatePartitions)
+        {
+            existing = await cucm.GetDirectoryNumberAsync(
+                did.Pattern, candidatePartition, context.CancellationToken);
+            if (existing is not null)
+            {
+                break;
+            }
+        }
+        if (existing is not null)
+        {
+            var reason = !string.IsNullOrWhiteSpace(existing.Usage) &&
+                !existing.Usage.Equals("Device", StringComparison.OrdinalIgnoreCase)
+                ? $"it is reserved by function in CUCM (usage: {existing.Usage})"
+                : "it is already configured in CUCM and in use";
+            throw new InvalidOperationException($"User DN '{pattern}' is no longer available: {reason}.");
+        }
+    }
+
+    return did;
 }
+
 
 static void EnsureUserDidCanBeAssigned(UserDid did, CucmDirectoryNumber? existing)
 {

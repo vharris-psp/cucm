@@ -38,6 +38,21 @@ Open `vt cucm dids` to browse, add, or replace inventory. The add and replace pr
 
 Use **Replace** to discard an unassigned inventory and seed a corrected list. Replacement is blocked when any local assignment exists and requires `Ctrl+Enter` or `Cmd+Enter` confirmation.
 
+### Reconciling against live CUCM usage
+
+The tracked inventory is always authoritative for *which numbers are valid DIDs* — CUCM is never trusted to expand that list on its own. It is, however, the source of truth for *whether a tracked number is currently in use*, since assignments can happen outside this tool (manual AXL/Admin changes) and some numbers are legitimately reserved by function rather than assigned to a person (call park, voicemail ports, translation patterns, hunt pilots, etc.).
+
+Set `user-did-scan-partitions` (comma-separated CUCM route partition names, e.g. `AllPhones`) with `vt module configure cucm` to enable reconciliation. With it configured:
+
+- `vt cucm dids list` merges the tracked inventory with every directory number actually configured in the scanned partition(s) and shows a STATUS/REASON for each:
+  - `AVAILABLE` — not configured in CUCM; free to assign to a user or facility.
+  - `RESERVED` — configured in CUCM, either assigned to a device or reserved by function (the reason names the CUCM `usage` value, e.g. `Call Park`, when it isn't a plain device line).
+  - `ANOMALY` — needs attention: either a number configured in the scanned partition(s) that isn't in the tracked inventory at all (likely misconfigured — never a real DID), or a tracked number this tool's local bookkeeping recorded as assigned but that CUCM no longer shows in the scanned partition(s) (stale; freed or reassigned outside this tool). Anomalies are never auto-corrected — review and fix the tracked inventory or CUCM configuration directly.
+- `vt cucm dids available` lists only the tracked numbers currently `AVAILABLE`.
+- Every DID assignment path (`users assign`, `phones` → **Assign available user DN**, `provision`) re-checks the selected DID against CUCM before saving and rejects it if CUCM now shows it in use or reserved by function, even if this tool's own bookkeeping still thought it was free.
+
+Without `user-did-scan-partitions` configured, `dids list`/`available` and assignment fall back to the local inventory's recorded assignments only, exactly as before.
+
 `vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select a phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The review screen's **OWNER ACTION** column shows whether the phone is getting a new owner, keeping its current one, or being reassigned away from another user. Saving adds the phone to the user's associated devices, sets the phone owner (replacing the previous owner if there was one — the previous owner's device association is removed automatically, best-effort), assigns the DN to the selected slot, ensures line 3 carries a room DN (leaving one alone if it already exists, otherwise assigning the `89898989` placeholder until a real per-phone/location room-DID source exists), and records the assignment locally.
 
 The phone-first flow remains available by opening a phone and choosing **Assign user DN to slot**, which shows the phone's existing lines plus an **Add new line** row (next available index) and a **Custom** escape hatch for a specific index. Assigning a new line beyond what CUCM already has fails if the phone's button template has no free Line-type button position at that index — change the template first via **Edit** on the phone. Availability is tracked by the local inventory, while CUCM remains authoritative for DN objects and phone configuration.
