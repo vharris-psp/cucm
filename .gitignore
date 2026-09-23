@@ -8,3 +8,5 @@
 /artifacts/
 **/bin/
 **/obj/
+
+/.vt/legacy/

@@ -3298,11 +3298,15 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 var reviewOwnerRaw, var reviewTemplateRaw,
             ])
         {
+            var reviewOwnerId = Normalize(reviewOwnerRaw);
+            var reviewCurrentOwner = reviewOwnerId is null
+                ? null
+                : (await RequirePhoneAsync(cucm, reviewPhoneName, context.CancellationToken)).OwnerUserName;
             // Empty values mean "leave unchanged" (UpdatePhoneAsync omits null fields), so
             // reviewing an intentional blank-out isn't distinguishable from "no change" here.
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Review changes to {reviewPhoneName}",
-                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "BUTTON TEMPLATE"],
+                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "OWNER ACTION", "BUTTON TEMPLATE"],
                 [
                     new ModuleTableRow(
                         "submit",
@@ -3314,9 +3318,10 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                             string.IsNullOrWhiteSpace(reviewDevicePoolRaw)
                                 ? "<Unchanged>"
                                 : Clean(reviewDevicePoolRaw),
-                            string.IsNullOrWhiteSpace(reviewOwnerRaw)
-                                ? "<Unchanged>"
-                                : Clean(reviewOwnerRaw),
+                            reviewOwnerId ?? "<Unchanged>",
+                            reviewOwnerId is null
+                                ? string.Empty
+                                : OwnerActionLabel(reviewCurrentOwner, reviewOwnerId),
                             string.IsNullOrWhiteSpace(reviewTemplateRaw)
                                 ? "<Unchanged>"
                                 : Clean(reviewTemplateRaw),
@@ -3334,20 +3339,99 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 var updateOwnerRaw, var updateTemplateRaw,
             ])
         {
-            // Description is intentionally omitted here: it's recomposed and saved below by
-            // ComposeAndApplyPhoneDescriptionAsync, after the device pool/owner/template changes
-            // above have already landed in CUCM (so compliance evaluates against the new values).
-            await cucm.UpdatePhoneAsync(
-                updatePhoneName,
-                null,
-                Normalize(updateDevicePoolRaw),
-                Normalize(updateOwnerRaw),
-                context.CancellationToken,
-                Normalize(updateTemplateRaw));
+            // Reassigns associated devices (like 'users assign') and ensures a room line exists
+            // (like 'provision'/'users assign') so the generic template setter can also be used to
+            // hand a phone off to a new owner or repurpose it onto a classroom-style template.
+            var updateOwnerId = Normalize(updateOwnerRaw);
+            string? previousOwnerUserId = null;
+            var addedAssociation = false;
+            if (updateOwnerId is not null)
+            {
+                var currentPhone = await RequirePhoneAsync(cucm, updatePhoneName, context.CancellationToken);
+                previousOwnerUserId = Normalize(currentPhone.OwnerUserName);
+                if (!updateOwnerId.Equals(previousOwnerUserId, StringComparison.OrdinalIgnoreCase))
+                {
+                    var newOwner = await RequireUserAsync(cucm, updateOwnerId, context.CancellationToken);
+                    var previousDevices = newOwner.AssociatedDevices.ToArray();
+                    addedAssociation = !previousDevices.Contains(
+                        updatePhoneName, StringComparer.OrdinalIgnoreCase);
+                    if (addedAssociation)
+                    {
+                        await cucm.UpdateUserAssociatedDevicesAsync(
+                            updateOwnerId,
+                            previousDevices.Append(updatePhoneName),
+                            context.CancellationToken);
+                    }
+                }
+            }
+            try
+            {
+                // Description is intentionally omitted here: it's recomposed and saved below by
+                // ComposeAndApplyPhoneDescriptionAsync, after the device pool/owner/template changes
+                // above have already landed in CUCM (so compliance evaluates against the new values).
+                await cucm.UpdatePhoneAsync(
+                    updatePhoneName,
+                    null,
+                    Normalize(updateDevicePoolRaw),
+                    updateOwnerId,
+                    context.CancellationToken,
+                    Normalize(updateTemplateRaw));
+            }
+            catch (Exception updateException)
+            {
+                if (addedAssociation)
+                {
+                    try
+                    {
+                        var newOwner = await RequireUserAsync(
+                            cucm, updateOwnerId!, context.CancellationToken);
+                        await cucm.UpdateUserAssociatedDevicesAsync(
+                            updateOwnerId!,
+                            newOwner.AssociatedDevices.Where(device =>
+                                !device.Equals(updatePhoneName, StringComparison.OrdinalIgnoreCase)),
+                            context.CancellationToken);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        throw new InvalidOperationException(
+                            "The phone update failed, and the user-device association could not " +
+                            "be rolled back.",
+                            new AggregateException(updateException, rollbackException));
+                    }
+                }
+                throw;
+            }
+            var updateWarnings = new List<string>();
+            var replacedOwner = updateOwnerId is not null && previousOwnerUserId is not null &&
+                !previousOwnerUserId.Equals(updateOwnerId, StringComparison.OrdinalIgnoreCase);
+            if (replacedOwner)
+            {
+                try
+                {
+                    await RemovePhoneFromPreviousOwnerAsync(
+                        cucm, previousOwnerUserId!, updatePhoneName, context.CancellationToken);
+                }
+                catch (Exception cleanupException)
+                {
+                    updateWarnings.Add(
+                        $"could not remove '{updatePhoneName}' from previous owner " +
+                        $"'{previousOwnerUserId}' associated devices: {cleanupException.Message}");
+                }
+            }
+            try
+            {
+                await EnsureRoomLineAsync(cucm, updatePhoneName, context.CancellationToken);
+            }
+            catch (Exception roomException)
+            {
+                updateWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
+            }
             var updateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, updatePhoneName, Normalize(updateDescriptionRaw), context.CancellationToken);
             return ModuleCommandResult.Ok(
-                $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'.");
+                $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'." +
+                (replacedOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
+                (updateWarnings.Count == 0 ? string.Empty : " WARNING: " + string.Join(" ", updateWarnings)));
         }
 
         return ModuleCommandResult.Fail(

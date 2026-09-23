@@ -621,7 +621,8 @@ internal sealed class ClassroomPhoneApplyException : InvalidOperationException
         IReadOnlyList<string> completedOperations,
         Exception innerException)
         : base(
-            $"Classroom Save stopped at '{failedOperation}'. Completed operations: " +
+            $"Classroom Save stopped at '{failedOperation}': {innerException.Message} Completed " +
+            $"operations: " +
             $"{(completedOperations.Count == 0 ? "none" : string.Join(", ", completedOperations))}. " +
             "No automatic rollback is available for CUCM AXL updates. Open the classroom workflow " +
             "again to review the remaining changes before retrying Save.",

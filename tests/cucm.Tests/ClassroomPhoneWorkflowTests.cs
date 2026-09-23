@@ -267,6 +267,8 @@ public sealed class ClassroomPhoneWorkflowTests
             ],
             writer.Calls);
         Assert.Contains("No automatic rollback", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Synthetic write failure.", exception.Message, StringComparison.Ordinal);
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
     }
 
     [Fact]
