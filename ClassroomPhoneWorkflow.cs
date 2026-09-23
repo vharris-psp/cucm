@@ -33,17 +33,68 @@ internal static class ClassroomWorkflowNavigation
         string buildingCode) =>
         ["phones", "classroom-room", phoneName, userId, buildingCode];
 
-    internal static IReadOnlyList<string> ReviewRoom(
+    internal static IReadOnlyList<string> SelectScope(
         string phoneName,
         string userId,
         string buildingCode) =>
-        ["phones", "classroom-review", phoneName, userId, buildingCode];
+        ["phones", "classroom-scope", phoneName, userId, buildingCode];
+
+    internal static IReadOnlyList<string> ReviewRoom(
+        string phoneName,
+        string userId,
+        string buildingCode,
+        string roomNumber,
+        ClassroomApplyScope scope) =>
+        [
+            "phones", "classroom-review", phoneName, userId, buildingCode, roomNumber,
+            ClassroomApplyScopes.ToToken(scope),
+        ];
 
     internal static IReadOnlyList<string> Save(ClassroomPhonePlan plan) =>
         [
             "phones", "classroom-apply", plan.PhoneName, plan.UserId, plan.BuildingCode,
-            plan.RoomNumber, plan.Fingerprint,
+            plan.RoomNumber, ClassroomApplyScopes.ToToken(plan.Scope), plan.Fingerprint,
         ];
+}
+
+// Lets a phone be brought partway onto a classroom template: only the room slot, only the user
+// slot, or both (the original all-in-one behavior).
+internal enum ClassroomApplyScope
+{
+    Both,
+    RoomOnly,
+    UserOnly,
+}
+
+internal static class ClassroomApplyScopes
+{
+    private const string BothToken = "both";
+    private const string RoomOnlyToken = "room";
+    private const string UserOnlyToken = "user";
+
+    internal static string ToToken(ClassroomApplyScope scope) => scope switch
+    {
+        ClassroomApplyScope.Both => BothToken,
+        ClassroomApplyScope.RoomOnly => RoomOnlyToken,
+        ClassroomApplyScope.UserOnly => UserOnlyToken,
+        _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+    };
+
+    internal static ClassroomApplyScope Parse(string token) => token switch
+    {
+        BothToken => ClassroomApplyScope.Both,
+        RoomOnlyToken => ClassroomApplyScope.RoomOnly,
+        UserOnlyToken => ClassroomApplyScope.UserOnly,
+        _ => throw new InvalidOperationException($"Unknown classroom apply scope '{token}'."),
+    };
+
+    internal static string Describe(ClassroomApplyScope scope) => scope switch
+    {
+        ClassroomApplyScope.Both => "Room and user (full template)",
+        ClassroomApplyScope.RoomOnly => "Room number only",
+        ClassroomApplyScope.UserOnly => "User/DN only",
+        _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+    };
 }
 
 internal sealed record ClassroomTemplateLayout(
@@ -83,6 +134,7 @@ internal sealed record ClassroomPhonePlan(
     string UserId,
     string BuildingCode,
     string RoomNumber,
+    ClassroomApplyScope Scope,
     string DevicePoolName,
     string PhoneTemplateName,
     ClassroomLinePlan UserLine,
@@ -115,7 +167,8 @@ internal sealed record ClassroomPhonePlanInput(
     string BuildingCode,
     string RoomNumber,
     LineTemplate RoomTemplate,
-    LineTemplate UserTemplate);
+    LineTemplate UserTemplate,
+    ClassroomApplyScope Scope = ClassroomApplyScope.Both);
 
 internal static class ClassroomPhonePlanner
 {
@@ -208,6 +261,8 @@ internal static class ClassroomPhonePlanner
             " ",
             new[] { input.User.FirstName, input.User.LastName }
                 .Where(part => !string.IsNullOrWhiteSpace(part))));
+        var includeRoom = input.Scope != ClassroomApplyScope.UserOnly;
+        var includeUser = input.Scope != ClassroomApplyScope.RoomOnly;
         var roomLine = CreateLinePlan(
             "Room",
             roomTemplate,
@@ -238,25 +293,40 @@ internal static class ClassroomPhonePlanner
             input.UserDid.CallingSearchSpaceName,
             userId,
             userDisplayName);
+        if (!includeRoom)
+        {
+            roomLine = ExcludeFromApply(roomLine);
+        }
+        if (!includeUser)
+        {
+            userLine = ExcludeFromApply(userLine);
+        }
 
+        var roomCurrentAppearance = input.Phone.Lines.FirstOrDefault(line => line.Index == roomLine.Index);
+        var userCurrentAppearance = input.Phone.Lines.FirstOrDefault(line => line.Index == userLine.Index);
         var prospectiveLines = input.Phone.Lines
             .Where(line => line.Index != userLine.Index && line.Index != roomLine.Index)
-            .Append(ToAppearance(userLine))
-            .Append(ToAppearance(roomLine))
+            .Append(includeUser ? ToAppearance(userLine) : userCurrentAppearance)
+            .Append(includeRoom ? ToAppearance(roomLine) : roomCurrentAppearance)
+            .Where(line => line is not null)
+            .Select(line => line!)
             .OrderBy(line => line.Index)
             .ToArray();
         var prospectivePhone = input.Phone with
         {
             DevicePoolName = devicePoolName,
             PhoneTemplateName = layout.PhoneTemplateName,
-            OwnerUserName = userId,
+            OwnerUserName = includeUser ? userId : input.Phone.OwnerUserName,
             Lines = prospectiveLines,
         };
         var compliance = PhoneConfigurationChecks.EvaluateTemplateCompliance(
             prospectivePhone,
             input.CompliancePolicies,
             input.BuildingPatterns);
-        if (compliance.Status != TemplateComplianceStatus.Compliant)
+        // A partial apply (room-only/user-only) is an intentional incremental step and may
+        // legitimately leave the phone non-compliant until the remaining slot is applied later;
+        // only a full "both slots" apply is required to land on a compliant phone.
+        if (input.Scope == ClassroomApplyScope.Both && compliance.Status != TemplateComplianceStatus.Compliant)
         {
             throw new InvalidOperationException(
                 $"The selected classroom policy does not produce a compliant phone: {compliance.Detail}");
@@ -272,11 +342,11 @@ internal static class ClassroomPhonePlanner
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var addUserAssociation = !input.User.AssociatedDevices.Contains(
+        var addUserAssociation = includeUser && !input.User.AssociatedDevices.Contains(
             phoneName,
             StringComparer.OrdinalIgnoreCase);
         var previousOwnerUserId = Normalize(input.Phone.OwnerUserName);
-        var replaceOwner = previousOwnerUserId is not null &&
+        var replaceOwner = includeUser && previousOwnerUserId is not null &&
             !previousOwnerUserId.Equals(userId, StringComparison.OrdinalIgnoreCase);
         var previousOwnerRemainingDevices = input.PreviousOwner?.AssociatedDevices
             .Where(device => !device.Equals(phoneName, StringComparison.OrdinalIgnoreCase))
@@ -294,7 +364,7 @@ internal static class ClassroomPhonePlanner
             description,
             StringComparison.Ordinal);
         var recordLocalAssignment =
-            input.UserDidUsesInventoryFallback && input.UserDid.Assignment is null;
+            includeUser && input.UserDidUsesInventoryFallback && input.UserDid.Assignment is null;
 
         var changes = CreateChanges(
             input,
@@ -302,6 +372,8 @@ internal static class ClassroomPhonePlanner
             devicePoolName,
             roomLine,
             userLine,
+            includeRoom,
+            includeUser,
             description,
             addUserAssociation,
             previousOwnerUserId,
@@ -313,6 +385,7 @@ internal static class ClassroomPhonePlanner
             userId,
             input.BuildingCode,
             input.RoomNumber,
+            input.Scope,
             devicePoolName,
             layout.PhoneTemplateName,
             userLine,
@@ -337,6 +410,7 @@ internal static class ClassroomPhonePlanner
         Append(canonical, plan.UserId);
         Append(canonical, plan.BuildingCode);
         Append(canonical, plan.RoomNumber);
+        Append(canonical, plan.Scope.ToString());
         foreach (var change in plan.Changes)
         {
             Append(canonical, change.Key);
@@ -379,9 +453,9 @@ internal static class ClassroomPhonePlanner
                 $"The classroom {kind.ToLowerInvariant()} line template must resolve '{field}' " +
                 "to a non-empty value.");
 
-        var alertingName = Resolve(template.AlertingName, "alertingName");
-        var display = Resolve(template.Display, "display");
-        var label = Resolve(template.Label, "label");
+        var alertingName = ValidateCucmLineText(Resolve(template.AlertingName, "alertingName"), kind, "alertingName");
+        var display = ValidateCucmLineText(Resolve(template.Display, "display"), kind, "display");
+        var label = ValidateCucmLineText(Resolve(template.Label, "label"), kind, "label");
         var externalMask = Resolve(template.ExternalPhoneNumberMask, "externalPhoneNumberMask");
         var voiceMailProfileName = Resolve(template.VoiceMailProfileName, "voiceMailProfileName");
         var currentLine = phone.Lines.FirstOrDefault(line => line.Index == index);
@@ -419,6 +493,8 @@ internal static class ClassroomPhonePlanner
         string devicePoolName,
         ClassroomLinePlan roomLine,
         ClassroomLinePlan userLine,
+        bool includeRoom,
+        bool includeUser,
         string description,
         bool addUserAssociation,
         string? previousOwnerUserId,
@@ -434,56 +510,56 @@ internal static class ClassroomPhonePlanner
             Change("phone.button-template", "Phone button template", input.Phone.PhoneTemplateName,
                 layout.PhoneTemplateName, "Update"),
             Change("room.dn", $"Room line {roomLine.Index} DN", roomCurrent?.Pattern,
-                roomLine.Pattern, roomLine.CreateDirectoryNumber ? "Create and assign" : "Assign"),
+                roomLine.Pattern, roomLine.CreateDirectoryNumber ? "Create and assign" : "Assign", includeRoom),
             Change("room.partition", "Room partition", roomCurrent?.RoutePartitionName,
-                roomLine.RoutePartitionName, "Assign"),
+                roomLine.RoutePartitionName, "Assign", includeRoom),
             Change("room.description", "Room DN description", input.RoomDirectoryNumber?.Description,
                 roomLine.CreateDirectoryNumber ? roomLine.Description : input.RoomDirectoryNumber?.Description,
-                roomLine.CreateDirectoryNumber ? "Create value" : "No change"),
+                roomLine.CreateDirectoryNumber ? "Create value" : "No change", includeRoom),
             Change("room.alerting-name", "Room alerting name", input.RoomDirectoryNumber?.AlertingName,
-                roomLine.AlertingName, "Update"),
+                roomLine.AlertingName, "Update", includeRoom),
             Change("room.caller-id", "Room caller ID", roomCurrent?.Display,
-                roomLine.Display, "Update"),
-            Change("room.label", "Room label", roomCurrent?.Label, roomLine.Label, "Update"),
+                roomLine.Display, "Update", includeRoom),
+            Change("room.label", "Room label", roomCurrent?.Label, roomLine.Label, "Update", includeRoom),
             Change("room.external-mask", "Room external mask", roomCurrent?.ExternalPhoneNumberMask,
-                roomLine.ExternalPhoneNumberMask, "Update"),
+                roomLine.ExternalPhoneNumberMask, "Update", includeRoom),
             Change("room.voicemail", "Room voicemail profile", input.RoomDirectoryNumber?.VoiceMailProfileName,
-                roomLine.VoiceMailProfileName, "Update"),
+                roomLine.VoiceMailProfileName, "Update", includeRoom),
             Change("user.dn", $"User line {userLine.Index} DN", userCurrent?.Pattern,
-                userLine.Pattern, userLine.CreateDirectoryNumber ? "Create and assign" : "Assign"),
+                userLine.Pattern, userLine.CreateDirectoryNumber ? "Create and assign" : "Assign", includeUser),
             Change("user.partition", "User partition", userCurrent?.RoutePartitionName,
-                userLine.RoutePartitionName, "Assign"),
+                userLine.RoutePartitionName, "Assign", includeUser),
             Change("user.description", "User DN description", input.UserDirectoryNumber?.Description,
                 userLine.CreateDirectoryNumber ? userLine.Description : input.UserDirectoryNumber?.Description,
-                userLine.CreateDirectoryNumber ? "Create value" : "No change"),
+                userLine.CreateDirectoryNumber ? "Create value" : "No change", includeUser),
             Change("user.css", "User calling search space", input.UserDirectoryNumber?.CallingSearchSpaceName,
                 userLine.CreateDirectoryNumber
                     ? userLine.CallingSearchSpaceName
                     : input.UserDirectoryNumber?.CallingSearchSpaceName,
-                userLine.CreateDirectoryNumber ? "Create value" : "No change"),
+                userLine.CreateDirectoryNumber ? "Create value" : "No change", includeUser),
             Change("user.alerting-name", "User alerting name", input.UserDirectoryNumber?.AlertingName,
-                userLine.AlertingName, "Update"),
+                userLine.AlertingName, "Update", includeUser),
             Change("user.caller-id", "User caller ID", userCurrent?.Display,
-                userLine.Display, "Update"),
-            Change("user.label", "User label", userCurrent?.Label, userLine.Label, "Update"),
+                userLine.Display, "Update", includeUser),
+            Change("user.label", "User label", userCurrent?.Label, userLine.Label, "Update", includeUser),
             Change("user.external-mask", "User external mask", userCurrent?.ExternalPhoneNumberMask,
-                userLine.ExternalPhoneNumberMask, "Update"),
+                userLine.ExternalPhoneNumberMask, "Update", includeUser),
             Change("user.voicemail", "User voicemail profile", input.UserDirectoryNumber?.VoiceMailProfileName,
-                userLine.VoiceMailProfileName, "Update"),
+                userLine.VoiceMailProfileName, "Update", includeUser),
             Change("user.owner", "Phone and user-line owner", input.Phone.OwnerUserName,
-                input.User.UserId, "Set owner"),
+                input.User.UserId, "Set owner", includeUser),
             new ClassroomPhoneChange(
                 "user.association",
                 "Selected user device association",
                 addUserAssociation ? "Not associated" : "Associated",
-                "Associated",
-                addUserAssociation ? "Add" : "No change"),
+                includeUser ? "Associated" : "<Not applied>",
+                !includeUser ? "Skip (excluded)" : addUserAssociation ? "Add" : "No change"),
             new ClassroomPhoneChange(
                 "previous-owner.association",
                 "Previous owner device association",
                 previousOwnerUserId ?? "<none>",
-                removePreviousOwnerAssociation ? "Removed" : "No stale association",
-                removePreviousOwnerAssociation ? "Remove" : "No change"),
+                !includeUser ? "<Not applied>" : removePreviousOwnerAssociation ? "Removed" : "No stale association",
+                !includeUser ? "Skip (excluded)" : removePreviousOwnerAssociation ? "Remove" : "No change"),
             Change("phone.description", "Description", input.Phone.Description, description, "Update"),
             new ClassroomPhoneChange(
                 "inventory.assignment",
@@ -491,10 +567,11 @@ internal static class ClassroomPhonePlanner
                 userDidUsesInventoryFallback
                     ? (recordLocalAssignment ? "Unassigned" : "Assigned")
                     : "Not used",
-                userDidUsesInventoryFallback
-                    ? $"{input.Phone.Name} line {userLine.Index}"
-                    : "Not used",
-                recordLocalAssignment ? "Record" : "No change"),
+                !includeUser ? "<Not applied>"
+                    : userDidUsesInventoryFallback
+                        ? $"{input.Phone.Name} line {userLine.Index}"
+                        : "Not used",
+                !includeUser ? "Skip (excluded)" : recordLocalAssignment ? "Record" : "No change"),
         ];
     }
 
@@ -503,13 +580,16 @@ internal static class ClassroomPhonePlanner
         string field,
         string? current,
         string? target,
-        string action) =>
-        new(
-            key,
-            field,
-            Display(current),
-            Display(target),
-            EqualsValue(current, target) ? "No change" : action);
+        string action,
+        bool included = true) =>
+        included
+            ? new(
+                key,
+                field,
+                Display(current),
+                Display(target),
+                EqualsValue(current, target) ? "No change" : action)
+            : new(key, field, Display(current), "<Not applied>", "Skip (excluded)");
 
     private static void ValidateLineTemplates(LineTemplate roomTemplate, LineTemplate userTemplate)
     {
@@ -526,11 +606,50 @@ internal static class ClassroomPhonePlanner
         }
     }
 
+    // CUCM validates a line's alertingName/display/label against the same DeviceNumPlanMap rule:
+    // max 30 characters, none of []"%<>&|{}. Checked here so a bad value (e.g. a display-name
+    // prefix that leaves no room for a long name) fails fast during review instead of surfacing as
+    // a raw AXL fault mid-Save.
+    private static readonly char[] ForbiddenCucmTextCharacters = ['[', ']', '"', '%', '<', '>', '&', '|', '{', '}'];
+
+    private static string ValidateCucmLineText(string value, string kind, string field)
+    {
+        if (value.Length > 30)
+        {
+            throw new InvalidOperationException(
+                $"The classroom {kind.ToLowerInvariant()} line template's '{field}' resolves to " +
+                $"'{value}' ({value.Length} characters), which exceeds CUCM's 30-character limit " +
+                "for this field. Shorten the template text or the value it substitutes (e.g. a " +
+                "long display name).");
+        }
+        var invalidIndex = value.IndexOfAny(ForbiddenCucmTextCharacters);
+        if (invalidIndex >= 0)
+        {
+            throw new InvalidOperationException(
+                $"The classroom {kind.ToLowerInvariant()} line template's '{field}' resolves to " +
+                $"'{value}', which contains the character '{value[invalidIndex]}'. CUCM does not " +
+                "allow []\"%<>&|{} in this field.");
+        }
+        return value;
+    }
+
     private static LineTemplate CreateClassroomRoomTemplate(LineTemplate defaults) => defaults with
     {
         AlertingName = "{building} Room {room}",
         Display = "{building} Room {room}",
         Label = "{building} Room {room}",
+    };
+
+    // Strips every actionable flag so an excluded slot's plan carries correct target values (for
+    // display/compliance purposes) but the executor performs no CUCM writes for it.
+    private static ClassroomLinePlan ExcludeFromApply(ClassroomLinePlan line) => line with
+    {
+        CreateDirectoryNumber = false,
+        AssignLine = false,
+        UpdateDirectoryNumber = false,
+        UpdateDisplay = false,
+        UpdateLabel = false,
+        UpdateExternalMask = false,
     };
 
     private static void EnsureRoomDirectoryNumberCanBeAssigned(

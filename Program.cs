@@ -373,7 +373,8 @@ static async ValueTask<ModuleCommandOutcome> ProvisionAsync(ModuleContext contex
                 throw new InvalidOperationException("Provisioning state is missing a user ID.");
 
             var user = await RequireUserAsync(cucm, createUserId, context.CancellationToken);
-            var did = await RequireAvailableUserDidAsync(context, cucm, createPattern, createPartition);
+            var did = await RequireAvailableUserDidAsync(
+                context, cucm, createPattern, createPartition);
             var previousOwnerUserId = createState.PreviousOwnerUserName;
             var replacingOwner = previousOwnerUserId is not null &&
                 !previousOwnerUserId.Equals(createUserId, StringComparison.OrdinalIgnoreCase);
@@ -2125,7 +2126,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             int.TryParse(didIndexText, out var didIndex) && didIndex > 0)
         {
             return ModuleCommandResult.Render(
-                await CreateAvailableUserDidsResponseAsync(context, cucm, phoneNameForDids, didIndex));
+                await CreateAvailableUserDidsResponseAsync(
+                    context, cucm, phoneNameForDids, didIndex));
         }
         if (context.Arguments is
             ["did-review", var phoneNameForDidReview, var reviewIndexText, var reviewPattern, var reviewPartition] &&
@@ -2474,24 +2476,62 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Room number for location {classroomBuildingCode}",
                 "Room number (3 digits)",
-                ClassroomWorkflowNavigation.ReviewRoom(
+                ClassroomWorkflowNavigation.SelectScope(
                     classroomRoomPhoneName,
                     classroomRoomUserId,
                     classroomBuildingCode)));
         }
         if (context.Arguments is
             [
-                "classroom-review", var classroomReviewPhoneName, var classroomReviewUserId,
-                var classroomReviewBuildingCode, var classroomReviewRoomNumber,
+                "classroom-scope", var classroomScopePhoneName, var classroomScopeUserId,
+                var classroomScopeBuildingCode, var classroomScopeRoomNumber,
             ])
         {
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Choose what to apply for {classroomScopePhoneName}",
+                ["SCOPE", "DETAIL"],
+                [
+                    new ModuleTableRow(
+                        "both",
+                        ["Apply both", ClassroomApplyScopes.Describe(ClassroomApplyScope.Both)],
+                        ClassroomWorkflowNavigation.ReviewRoom(
+                            classroomScopePhoneName, classroomScopeUserId, classroomScopeBuildingCode,
+                            classroomScopeRoomNumber, ClassroomApplyScope.Both)),
+                    new ModuleTableRow(
+                        "room",
+                        [
+                            "Room number only",
+                            "Assign only the classroom room DN; leave the user line unchanged",
+                        ],
+                        ClassroomWorkflowNavigation.ReviewRoom(
+                            classroomScopePhoneName, classroomScopeUserId, classroomScopeBuildingCode,
+                            classroomScopeRoomNumber, ClassroomApplyScope.RoomOnly)),
+                    new ModuleTableRow(
+                        "user",
+                        [
+                            "User/DN only",
+                            "Assign only the user's DN and owner; leave the room line unchanged",
+                        ],
+                        ClassroomWorkflowNavigation.ReviewRoom(
+                            classroomScopePhoneName, classroomScopeUserId, classroomScopeBuildingCode,
+                            classroomScopeRoomNumber, ClassroomApplyScope.UserOnly)),
+                ]));
+        }
+        if (context.Arguments is
+            [
+                "classroom-review", var classroomReviewPhoneName, var classroomReviewUserId,
+                var classroomReviewBuildingCode, var classroomReviewRoomNumber, var classroomReviewScopeToken,
+            ])
+        {
+            var classroomReviewScope = ClassroomApplyScopes.Parse(classroomReviewScopeToken);
             var plan = await CreateClassroomPhonePlanAsync(
                 context,
                 cucm,
                 classroomReviewPhoneName,
                 classroomReviewUserId,
                 classroomReviewBuildingCode,
-                classroomReviewRoomNumber);
+                classroomReviewRoomNumber,
+                classroomReviewScope);
             var reviewRows = plan.Changes
                 .Select(change => new ModuleTableRow(
                     change.Key,
@@ -2502,7 +2542,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                     ClassroomWorkflowNavigation.Save(plan)))
                 .ToArray();
             return ModuleCommandResult.Render(new ModuleTableResponse(
-                $"Review classroom template for {classroomReviewPhoneName}",
+                $"Review classroom template for {classroomReviewPhoneName} " +
+                    $"({ClassroomApplyScopes.Describe(classroomReviewScope)})",
                 ["FIELD", "CURRENT", "TARGET", "ACTION"],
                 reviewRows,
                 SubmitMode: ModuleTableSubmitMode.Save));
@@ -2510,7 +2551,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
         if (context.Arguments is
             [
                 "classroom-apply", var classroomApplyPhoneName, var classroomApplyUserId,
-                var classroomApplyBuildingCode, var classroomApplyRoomNumber, var reviewedFingerprint,
+                var classroomApplyBuildingCode, var classroomApplyRoomNumber, var classroomApplyScopeToken,
+                var reviewedFingerprint,
             ])
         {
             var plan = await CreateClassroomPhonePlanAsync(
@@ -2519,7 +2561,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 classroomApplyPhoneName,
                 classroomApplyUserId,
                 classroomApplyBuildingCode,
-                classroomApplyRoomNumber);
+                classroomApplyRoomNumber,
+                ClassroomApplyScopes.Parse(classroomApplyScopeToken));
             if (!plan.Fingerprint.Equals(reviewedFingerprint, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
@@ -3298,15 +3341,11 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 var reviewOwnerRaw, var reviewTemplateRaw,
             ])
         {
-            var reviewOwnerId = Normalize(reviewOwnerRaw);
-            var reviewCurrentOwner = reviewOwnerId is null
-                ? null
-                : (await RequirePhoneAsync(cucm, reviewPhoneName, context.CancellationToken)).OwnerUserName;
             // Empty values mean "leave unchanged" (UpdatePhoneAsync omits null fields), so
             // reviewing an intentional blank-out isn't distinguishable from "no change" here.
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Review changes to {reviewPhoneName}",
-                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "OWNER ACTION", "BUTTON TEMPLATE"],
+                ["PHONE", "DESCRIPTION", "DEVICE POOL", "OWNER", "BUTTON TEMPLATE"],
                 [
                     new ModuleTableRow(
                         "submit",
@@ -3318,10 +3357,9 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                             string.IsNullOrWhiteSpace(reviewDevicePoolRaw)
                                 ? "<Unchanged>"
                                 : Clean(reviewDevicePoolRaw),
-                            reviewOwnerId ?? "<Unchanged>",
-                            reviewOwnerId is null
-                                ? string.Empty
-                                : OwnerActionLabel(reviewCurrentOwner, reviewOwnerId),
+                            string.IsNullOrWhiteSpace(reviewOwnerRaw)
+                                ? "<Unchanged>"
+                                : Clean(reviewOwnerRaw),
                             string.IsNullOrWhiteSpace(reviewTemplateRaw)
                                 ? "<Unchanged>"
                                 : Clean(reviewTemplateRaw),
@@ -3339,99 +3377,20 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 var updateOwnerRaw, var updateTemplateRaw,
             ])
         {
-            // Reassigns associated devices (like 'users assign') and ensures a room line exists
-            // (like 'provision'/'users assign') so the generic template setter can also be used to
-            // hand a phone off to a new owner or repurpose it onto a classroom-style template.
-            var updateOwnerId = Normalize(updateOwnerRaw);
-            string? previousOwnerUserId = null;
-            var addedAssociation = false;
-            if (updateOwnerId is not null)
-            {
-                var currentPhone = await RequirePhoneAsync(cucm, updatePhoneName, context.CancellationToken);
-                previousOwnerUserId = Normalize(currentPhone.OwnerUserName);
-                if (!updateOwnerId.Equals(previousOwnerUserId, StringComparison.OrdinalIgnoreCase))
-                {
-                    var newOwner = await RequireUserAsync(cucm, updateOwnerId, context.CancellationToken);
-                    var previousDevices = newOwner.AssociatedDevices.ToArray();
-                    addedAssociation = !previousDevices.Contains(
-                        updatePhoneName, StringComparer.OrdinalIgnoreCase);
-                    if (addedAssociation)
-                    {
-                        await cucm.UpdateUserAssociatedDevicesAsync(
-                            updateOwnerId,
-                            previousDevices.Append(updatePhoneName),
-                            context.CancellationToken);
-                    }
-                }
-            }
-            try
-            {
-                // Description is intentionally omitted here: it's recomposed and saved below by
-                // ComposeAndApplyPhoneDescriptionAsync, after the device pool/owner/template changes
-                // above have already landed in CUCM (so compliance evaluates against the new values).
-                await cucm.UpdatePhoneAsync(
-                    updatePhoneName,
-                    null,
-                    Normalize(updateDevicePoolRaw),
-                    updateOwnerId,
-                    context.CancellationToken,
-                    Normalize(updateTemplateRaw));
-            }
-            catch (Exception updateException)
-            {
-                if (addedAssociation)
-                {
-                    try
-                    {
-                        var newOwner = await RequireUserAsync(
-                            cucm, updateOwnerId!, context.CancellationToken);
-                        await cucm.UpdateUserAssociatedDevicesAsync(
-                            updateOwnerId!,
-                            newOwner.AssociatedDevices.Where(device =>
-                                !device.Equals(updatePhoneName, StringComparison.OrdinalIgnoreCase)),
-                            context.CancellationToken);
-                    }
-                    catch (Exception rollbackException)
-                    {
-                        throw new InvalidOperationException(
-                            "The phone update failed, and the user-device association could not " +
-                            "be rolled back.",
-                            new AggregateException(updateException, rollbackException));
-                    }
-                }
-                throw;
-            }
-            var updateWarnings = new List<string>();
-            var replacedOwner = updateOwnerId is not null && previousOwnerUserId is not null &&
-                !previousOwnerUserId.Equals(updateOwnerId, StringComparison.OrdinalIgnoreCase);
-            if (replacedOwner)
-            {
-                try
-                {
-                    await RemovePhoneFromPreviousOwnerAsync(
-                        cucm, previousOwnerUserId!, updatePhoneName, context.CancellationToken);
-                }
-                catch (Exception cleanupException)
-                {
-                    updateWarnings.Add(
-                        $"could not remove '{updatePhoneName}' from previous owner " +
-                        $"'{previousOwnerUserId}' associated devices: {cleanupException.Message}");
-                }
-            }
-            try
-            {
-                await EnsureRoomLineAsync(cucm, updatePhoneName, context.CancellationToken);
-            }
-            catch (Exception roomException)
-            {
-                updateWarnings.Add($"could not ensure a room DN on line 3: {roomException.Message}");
-            }
+            // Description is intentionally omitted here: it's recomposed and saved below by
+            // ComposeAndApplyPhoneDescriptionAsync, after the device pool/owner/template changes
+            // above have already landed in CUCM (so compliance evaluates against the new values).
+            await cucm.UpdatePhoneAsync(
+                updatePhoneName,
+                null,
+                Normalize(updateDevicePoolRaw),
+                Normalize(updateOwnerRaw),
+                context.CancellationToken,
+                Normalize(updateTemplateRaw));
             var updateComposedDescription = await ComposeAndApplyPhoneDescriptionAsync(
                 context, cucm, updatePhoneName, Normalize(updateDescriptionRaw), context.CancellationToken);
             return ModuleCommandResult.Ok(
-                $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'." +
-                (replacedOwner ? $" Replaced previous owner '{previousOwnerUserId}'." : string.Empty) +
-                (updateWarnings.Count == 0 ? string.Empty : " WARNING: " + string.Join(" ", updateWarnings)));
+                $"Updated phone '{updatePhoneName}'. Description: '{updateComposedDescription}'.");
         }
 
         return ModuleCommandResult.Fail(
@@ -3478,9 +3437,6 @@ static async Task<ModuleResponse> CreateAvailableUserDidsResponseAsync(
         rows);
 }
 
-// Live-reconciles against CUCM's configured DID scan partition(s) when 'user-did-scan-partitions'
-// is set, so a DID already in use or reserved by function is never offered; otherwise falls back
-// to the local inventory's recorded assignments only.
 static async Task<IReadOnlyList<UserDid>> LoadAvailableUserDidsAsync(
     ModuleContext context,
     CucmService cucm)
@@ -3592,7 +3548,6 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                     .ToArray(),
                 Selectable: false));
         }
-
         if (context.Arguments is ["add"])
         {
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
@@ -3687,15 +3642,14 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
             string.Equals(candidate.RoutePartitionName, partition, StringComparison.Ordinal));
     if (did is null)
     {
-        throw new InvalidOperationException($"User DN '{pattern}' is not present in the local inventory.");
+        throw new InvalidOperationException(
+            $"User DN '{pattern}' is not present in the local inventory.");
     }
     if (did.Assignment is not null)
     {
         throw new InvalidOperationException($"User DN '{pattern}' is no longer available.");
     }
 
-    // Guard against handing out a DID that CUCM shows is already in use or reserved by function,
-    // even though nothing in this tool's own bookkeeping recorded that assignment.
     var scanPartitions = UserDidReconciler.ParsePartitions(
         context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
     if (scanPartitions.Count > 0)
@@ -3719,13 +3673,13 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
                 !existing.Usage.Equals("Device", StringComparison.OrdinalIgnoreCase)
                 ? $"it is reserved by function in CUCM (usage: {existing.Usage})"
                 : "it is already configured in CUCM and in use";
-            throw new InvalidOperationException($"User DN '{pattern}' is no longer available: {reason}.");
+            throw new InvalidOperationException(
+                $"User DN '{pattern}' is no longer available: {reason}.");
         }
     }
 
     return did;
 }
-
 
 static void EnsureUserDidCanBeAssigned(UserDid did, CucmDirectoryNumber? existing)
 {
@@ -3856,7 +3810,8 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
     string phoneName,
     string userId,
     string buildingCode,
-    string roomNumber)
+    string roomNumber,
+    ClassroomApplyScope scope = ClassroomApplyScope.Both)
 {
     var buildingPatterns = await RequireBuildingPatternsAsync(context);
     var buildingPattern = RequireBuildingPattern(buildingPatterns, buildingCode);
@@ -3918,7 +3873,8 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         buildingCode,
         roomNumber,
         roomTemplate,
-        userTemplate));
+        userTemplate,
+        scope));
 }
 
 static string RequireConfigurationValue(ModuleContext context, string key) =>

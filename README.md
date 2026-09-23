@@ -28,8 +28,9 @@ Configure the defaults applied to newly imported DIDs with `vt module configure 
 - `user-did-css`
 - `user-did-voicemail-profile`
 - `user-did-description-prefix`
+- `user-did-scan-partitions` — comma-separated CUCM route partitions checked for live DN usage
 
-Open `vt cucm dids` to browse, add, or replace inventory. The add and replace prompts accept comma-separated four-digit values or an equal-width numeric range:
+Open `vt cucm dids` to browse, add, replace, or list only available inventory. The add and replace prompts accept comma-separated four-digit values or an equal-width numeric range:
 
 ```text
 2100,2101
@@ -38,20 +39,7 @@ Open `vt cucm dids` to browse, add, or replace inventory. The add and replace pr
 
 Use **Replace** to discard an unassigned inventory and seed a corrected list. Replacement is blocked when any local assignment exists and requires `Ctrl+Enter` or `Cmd+Enter` confirmation.
 
-### Reconciling against live CUCM usage
-
-The tracked inventory is always authoritative for *which numbers are valid DIDs* — CUCM is never trusted to expand that list on its own. It is, however, the source of truth for *whether a tracked number is currently in use*, since assignments can happen outside this tool (manual AXL/Admin changes) and some numbers are legitimately reserved by function rather than assigned to a person (call park, voicemail ports, translation patterns, hunt pilots, etc.).
-
-Set `user-did-scan-partitions` (comma-separated CUCM route partition names, e.g. `AllPhones`) with `vt module configure cucm` to enable reconciliation. With it configured:
-
-- `vt cucm dids list` merges the tracked inventory with every directory number actually configured in the scanned partition(s) and shows a STATUS/REASON for each:
-  - `AVAILABLE` — not configured in CUCM; free to assign to a user or facility.
-  - `RESERVED` — configured in CUCM, either assigned to a device or reserved by function (the reason names the CUCM `usage` value, e.g. `Call Park`, when it isn't a plain device line).
-  - `ANOMALY` — needs attention: either a number configured in the scanned partition(s) that isn't in the tracked inventory at all (likely misconfigured — never a real DID), or a tracked number this tool's local bookkeeping recorded as assigned but that CUCM no longer shows in the scanned partition(s) (stale; freed or reassigned outside this tool). Anomalies are never auto-corrected — review and fix the tracked inventory or CUCM configuration directly.
-- `vt cucm dids available` lists only the tracked numbers currently `AVAILABLE`.
-- Every DID assignment path (`users assign`, `phones` → **Assign available user DN**, `provision`) re-checks the selected DID against CUCM before saving and rejects it if CUCM now shows it in use or reserved by function, even if this tool's own bookkeeping still thought it was free.
-
-Without `user-did-scan-partitions` configured, `dids list`/`available` and assignment fall back to the local inventory's recorded assignments only, exactly as before.
+When `user-did-scan-partitions` is configured, inventory lists and assignment choices are reconciled against live CUCM directory numbers. Numbers already configured in CUCM, including function-reserved numbers, are not offered for assignment. Without the setting, availability falls back to the module's local assignment records.
 
 `vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select a phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The review screen's **OWNER ACTION** column shows whether the phone is getting a new owner, keeping its current one, or being reassigned away from another user. Saving adds the phone to the user's associated devices, sets the phone owner (replacing the previous owner if there was one — the previous owner's device association is removed automatically, best-effort), assigns the DN to the selected slot, ensures line 3 carries a room DN (leaving one alone if it already exists, otherwise assigning the `89898989` placeholder until a real per-phone/location room-DID source exists), and records the assignment locally.
 
@@ -66,8 +54,6 @@ The versioned JSON document is a temporary persistence boundary. A future DirSyn
 `vt cucm dn` lists directory numbers; selecting one opens **Info**, **Edit**, or **Delete**. Edit walks through calling search space, voicemail profile, and forward-all, then saves via review. Delete requires review confirmation. `vt cucm dn add` remains for creating a new DN directly.
 
 `vt cucm phones` lists phones — with an **&lt;Add phone&gt;** row at the end for creating a new, unregistered CUCM phone shell from scratch (name, description, product, device pool, phone button template, security profile, optional owner, then review/save); the same flow is available directly via `vt cucm phones add`. Selecting an existing phone opens **Edit** (description, device pool, owner, button template) alongside the existing line-label and DN-slot actions.
-
-**Edit** doubles as a general-purpose reassignment/re-templating tool: when the **Owner** field is changed (the review screen's **OWNER ACTION** column states whether it's a new owner, unchanged, or a replacement), saving adds the phone to the new owner's associated devices, removes it from the previous owner's associated devices (best-effort, reported as a warning on failure), and — regardless of whether the owner changed — ensures line 3 carries a room DN exactly like `users assign`/`provision` do (creating the `89898989` placeholder DN and assigning it if line 3 is empty; an existing line 3 is left untouched, and failures are reported as a warning rather than blocking the rest of the save). This makes **Edit** the way to both switch a phone onto a different button template (e.g. a classroom template requiring a room line) and hand it to a new owner in one save.
 
 Each phone's **Numbers** listing (`phones` → select a phone → **Numbers**) shows every existing line plus an **Add new line** row (next available index). Selecting any line — existing or new — offers **Set directory number** (prompts for the DN, then its route partition, and works for a brand-new line the same way **Assign available user DN**/**Assign room DN** already did; it fails with button-template guidance if the line index has no free Line-type button position), **Assign available user DN**, **Assign room DN**, and **Set DN options** (see below). Once a line actually has a DN in CUCM, two more actions appear: **Set label** and **Set caller ID** (sets the line's outbound display name), plus **Remove directory number**.
 
@@ -155,9 +141,13 @@ The selected location's `devicePoolName` is the device pool assigned to the phon
 
 From an existing phone, choose **Apply template** and then **Classroom**. Select a user and location, then enter the room's 3-digit number. The module resolves the effective phone button template and requires its `template-compliance-policies` entry to define exactly one user slot and one room slot. It also requires unambiguous `building-patterns` and complete room/user line templates named by the required `classroom-room-line-template` and `classroom-user-line-template` settings. The room template supplies shared external-mask and voicemail defaults, while the selected location always derives the room partition and the room description, alerting name, caller ID, and line label as `<LOCATION> Room <ROOM>` (for example, `PHS Room 130`). The configured user template supplies the user-line values and must set `associateEndUser` to `true`.
 
+After the room number, a **scope** selection lets the two slots be applied independently: **Apply both** (the full classroom template — the original behavior), **Room number only** (assigns/updates just the room line; the user's DN, owner, and device association are left completely untouched), or **User/DN only** (assigns/updates just the user's DN, owner, and device association; the room line is left completely untouched). The review screen marks every field belonging to an excluded slot as `<Not applied>` / `Skip (excluded)` so it's clear nothing will be written for it, and a partial apply is not required to leave the phone fully compliant (unlike a full "both" apply, which still is) since it's an intentional incremental step. The device pool and button template are always brought in line regardless of scope, since either slot depends on the phone having the right button positions.
+
 The selected user's CUCM primary extension is authoritative when it is a four-digit DN; a four-digit LDAP telephone number is used only when no primary extension is assigned. The classroom workflow does not allocate from the local user-DN inventory when neither assigned value is available; that case must be handled through a dedicated allocation workflow.
 
 Before writing anything, the module renders a deterministic review of every managed current and target value: device pool, button template, both DNs and partitions, DN creation defaults, labels, caller ID, external masks, voicemail, owner and device associations, compliance description, and local inventory assignment. The explicit **Save** row is bound to that reviewed state. Save re-reads CUCM and rejects the submission if the phone, user, room, or policy-derived plan changed after review. It then applies only required operations and supports a no-write retry once the phone is converged. If CUCM fails partway through, the module reports the failed operation, the underlying CUCM/AXL error message, and the operations already completed; because AXL offers no transaction across these resources, it requires a fresh review before retry instead of claiming rollback.
+
+Every resolved `alertingName`, `display` (caller ID), and `label` value is validated against CUCM's own DeviceNumPlanMap constraint — 30 characters maximum and none of `[ ] " % < > & | { }` — before the review screen is even shown, so a template whose substituted text is too long (e.g. a fixed prefix combined with a long `{userDisplayName}`) or contains a disallowed character fails fast with a clear message instead of aborting mid-Save with a raw AXL fault.
 
 From a phone's line menu (`vt cucm phones` → select a phone → **Numbers** → select a line), choose **Assign room DN** to select a building, enter a 3-digit room number, then review and save. The module creates the DN in the building's partition if it doesn't already exist (rejecting a room number that already exists in a *different* partition) and assigns it to the line — no local inventory entry is created, since room DNs are provisioned on demand rather than drawn from the approved user-DN pool.
 

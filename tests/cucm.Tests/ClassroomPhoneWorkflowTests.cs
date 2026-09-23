@@ -39,10 +39,17 @@ public sealed class ClassroomPhoneWorkflowTests
             ["phones", "classroom-room", "SEP0001", "alice", "HS"],
             ClassroomWorkflowNavigation.SelectBuilding("SEP0001", "alice", "HS"));
         Assert.Equal(
-            ["phones", "classroom-review", "SEP0001", "alice", "HS"],
-            ClassroomWorkflowNavigation.ReviewRoom("SEP0001", "alice", "HS"));
+            ["phones", "classroom-scope", "SEP0001", "alice", "HS"],
+            ClassroomWorkflowNavigation.SelectScope("SEP0001", "alice", "HS"));
         Assert.Equal(
-            ["phones", "classroom-apply", "SEP0001", "alice", "HS", "130", plan.Fingerprint],
+            ["phones", "classroom-review", "SEP0001", "alice", "HS", "130", "both"],
+            ClassroomWorkflowNavigation.ReviewRoom("SEP0001", "alice", "HS", "130", ClassroomApplyScope.Both));
+        Assert.Equal(
+            ["phones", "classroom-review", "SEP0001", "alice", "HS", "130", "room"],
+            ClassroomWorkflowNavigation.ReviewRoom(
+                "SEP0001", "alice", "HS", "130", ClassroomApplyScope.RoomOnly));
+        Assert.Equal(
+            ["phones", "classroom-apply", "SEP0001", "alice", "HS", "130", "both", plan.Fingerprint],
             ClassroomWorkflowNavigation.Save(plan));
     }
 
@@ -160,6 +167,110 @@ public sealed class ClassroomPhoneWorkflowTests
         var exception = Assert.Throws<InvalidOperationException>(() => ClassroomPhonePlanner.Create(input));
 
         Assert.Contains("externalPhoneNumberMask", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RoomOnlyScopeExcludesEveryUserLineOperationAndAssociation()
+    {
+        var plan = ClassroomPhonePlanner.Create(
+            CreateInput() with { Scope = ClassroomApplyScope.RoomOnly });
+
+        Assert.False(plan.UserLine.CreateDirectoryNumber);
+        Assert.False(plan.UserLine.AssignLine);
+        Assert.False(plan.UserLine.UpdateDirectoryNumber);
+        Assert.False(plan.UserLine.UpdateDisplay);
+        Assert.False(plan.UserLine.UpdateLabel);
+        Assert.False(plan.UserLine.UpdateExternalMask);
+        Assert.False(plan.AddUserAssociation);
+        Assert.False(plan.RemovePreviousOwnerAssociation);
+        Assert.False(plan.RecordLocalAssignment);
+        Assert.Null(plan.PreviousOwnerUserId);
+        Assert.True(plan.RoomLine.CreateDirectoryNumber);
+        Assert.True(plan.RoomLine.AssignLine);
+
+        var userDnChange = Assert.Single(plan.Changes.Where(change => change.Key == "user.dn"));
+        Assert.Equal("<Not applied>", userDnChange.Target);
+        Assert.Equal("Skip (excluded)", userDnChange.Action);
+    }
+
+    [Fact]
+    public void UserOnlyScopeExcludesEveryRoomLineOperation()
+    {
+        var plan = ClassroomPhonePlanner.Create(
+            CreateInput() with { Scope = ClassroomApplyScope.UserOnly });
+
+        Assert.False(plan.RoomLine.CreateDirectoryNumber);
+        Assert.False(plan.RoomLine.AssignLine);
+        Assert.False(plan.RoomLine.UpdateDirectoryNumber);
+        Assert.False(plan.RoomLine.UpdateDisplay);
+        Assert.False(plan.RoomLine.UpdateLabel);
+        Assert.False(plan.RoomLine.UpdateExternalMask);
+        Assert.True(plan.UserLine.CreateDirectoryNumber);
+        Assert.True(plan.UserLine.AssignLine);
+        Assert.True(plan.AddUserAssociation);
+
+        var roomDnChange = Assert.Single(plan.Changes.Where(change => change.Key == "room.dn"));
+        Assert.Equal("<Not applied>", roomDnChange.Target);
+        Assert.Equal("Skip (excluded)", roomDnChange.Action);
+    }
+
+    [Fact]
+    public void PartialScopeDoesNotRequireTheResultingPhoneToBeFullyCompliant()
+    {
+        // With an empty phone and only the room slot included, the user slot stays unfilled —
+        // which would fail the full "Both" compliance check but must not block a partial apply.
+        var plan = ClassroomPhonePlanner.Create(
+            CreateInput() with { Scope = ClassroomApplyScope.RoomOnly });
+
+        Assert.Equal(ClassroomApplyScope.RoomOnly, plan.Scope);
+    }
+
+    [Fact]
+    public async Task SaveOnlySendsRoomOperationsWhenScopeIsRoomOnly()
+    {
+        var writer = new RecordingWriter();
+        var plan = ClassroomPhonePlanner.Create(
+            CreateInput() with { Scope = ClassroomApplyScope.RoomOnly });
+
+        var result = await ClassroomPhoneExecutor.ExecuteAsync(plan, writer);
+
+        Assert.DoesNotContain(writer.Calls, call => call.Contains("User", StringComparison.Ordinal));
+        Assert.DoesNotContain(writer.Calls, call => call == "selected-user-association");
+        Assert.DoesNotContain(writer.Calls, call => call == "local-assignment");
+        Assert.Contains("create-Room", writer.Calls);
+        Assert.Contains("assign-Room", writer.Calls);
+        Assert.NotEmpty(result.CompletedOperations);
+    }
+
+    [Fact]
+    public void PlannerRejectsADisplayValueThatExceedsCucmsThirtyCharacterLimit()
+    {
+        var input = CreateInput() with
+        {
+            UserTemplate = CreateInput().UserTemplate with
+            {
+                Display = "Public Schools of Petoskey:{userDisplayName}",
+            },
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => ClassroomPhonePlanner.Create(input));
+
+        Assert.Contains("30-character limit", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("'display'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlannerRejectsALabelValueContainingACharacterCucmForbids()
+    {
+        var input = CreateInput() with
+        {
+            UserTemplate = CreateInput().UserTemplate with { Label = "{userDisplayName} <Line>" },
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() => ClassroomPhonePlanner.Create(input));
+
+        Assert.Contains("'label'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("does not allow", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
