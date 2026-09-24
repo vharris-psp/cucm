@@ -34,12 +34,15 @@ internal sealed record BuildingPattern(
     string RoutePartitionName,
     IReadOnlyList<string> DevicePoolNames,
     string? PhoneTemplateName = null,
-    string? DevicePoolName = null);
+    string? DevicePoolName = null,
+    string? RoomExternalPhoneNumberMask = null,
+    string? AllCallNumber = null);
 
 internal enum TemplateComplianceSlotKind
 {
     User,
     Room,
+    SpeedDial,
 }
 
 internal sealed record TemplateComplianceSlot(int Index, TemplateComplianceSlotKind Kind);
@@ -240,7 +243,9 @@ internal static class PhoneConfigurationChecks
                     routePartitionName!,
                     devicePools,
                     ReadString(property.Value, "phoneTemplateName"),
-                    devicePoolName);
+                    devicePoolName,
+                    ReadString(property.Value, "roomExternalPhoneNumberMask"),
+                    ReadString(property.Value, "allCallNumber"));
             }
             return patterns;
         }
@@ -298,7 +303,7 @@ internal static class PhoneConfigurationChecks
                         throw new InvalidOperationException(
                             $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
                             "an invalid slot entry; each slot needs an integer 'index' and a 'kind' of " +
-                            "'user' or 'room'.");
+                            "'user', 'room', or 'speeddial'.");
                     }
                     var index = indexNode.GetInt32();
                     if (index <= 0)
@@ -311,9 +316,10 @@ internal static class PhoneConfigurationChecks
                     {
                         "user" => TemplateComplianceSlotKind.User,
                         "room" => TemplateComplianceSlotKind.Room,
+                        "speeddial" => TemplateComplianceSlotKind.SpeedDial,
                         var other => throw new InvalidOperationException(
                             $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
-                            $"an unknown slot kind '{other}'; expected 'user' or 'room'."),
+                            $"an unknown slot kind '{other}'; expected 'user', 'room', or 'speeddial'."),
                     };
                     slots.Add(new TemplateComplianceSlot(index, kind));
                 }
@@ -709,11 +715,36 @@ internal static class PhoneConfigurationChecks
         return results;
     }
 
+    // Resolves the classroom user-slot line index from the phone's button template compliance
+    // policy, without evaluating full compliance. Used by callers that need to fetch the user DN
+    // (e.g. for call-forward/pickup-group checks) before invoking EvaluateClassroom.
+    internal static int? TryResolveClassroomUserLineIndex(
+        CucmPhone phone,
+        IReadOnlyDictionary<string, TemplateCompliancePolicy> policies)
+    {
+        if (string.IsNullOrWhiteSpace(phone.PhoneTemplateName) ||
+            !policies.TryGetValue(phone.PhoneTemplateName, out var policy))
+        {
+            return null;
+        }
+        var userSlots = policy.Slots
+            .Where(slot => slot.Kind == TemplateComplianceSlotKind.User)
+            .Select(slot => slot.Index)
+            .Distinct()
+            .ToArray();
+        return userSlots.Length == 1 ? userSlots[0] : null;
+    }
+
     internal static IReadOnlyList<PhoneCheckResult> EvaluateClassroom(
         CucmPhone phone,
         CucmUser? owner,
         IReadOnlyDictionary<string, TemplateCompliancePolicy> policies,
-        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns)
+        IReadOnlyDictionary<string, BuildingPattern> buildingPatterns,
+        CucmDirectoryNumber? userDirectoryNumber = null,
+        string? expectedForwardCallingSearchSpaceName = null,
+        string? expectedCallingSearchSpaceActivationPolicy = null,
+        int? expectedNoAnswerRingDurationSeconds = null,
+        IReadOnlyCollection<string>? availableVoiceMailProfiles = null)
     {
         ArgumentNullException.ThrowIfNull(phone);
         ArgumentNullException.ThrowIfNull(policies);
@@ -798,6 +829,120 @@ internal static class PhoneConfigurationChecks
         }
 
         results.AddRange(EvaluateRoomRouting(phone, buildingPatterns, roomSlots[0]));
+
+        if (availableVoiceMailProfiles is not null)
+        {
+            var profileName = userDirectoryNumber?.VoiceMailProfileName;
+            var isValid = !string.IsNullOrWhiteSpace(profileName) &&
+                availableVoiceMailProfiles.Any(name => string.Equals(name, profileName, StringComparison.OrdinalIgnoreCase));
+            results.Add(new PhoneCheckResult(
+                "User DN voicemail profile",
+                "A voicemail profile configured in CUCM",
+                Display(profileName),
+                isValid ? PhoneCheckStatus.Passed : PhoneCheckStatus.Failed,
+                isValid
+                    ? "Voicemail profile is configured in CUCM."
+                    : $"Voicemail profile '{Display(profileName)}' was not found among CUCM's configured " +
+                        "voicemail profiles."));
+        }
+
+        var pickupGroupName = userDirectoryNumber?.CallPickupGroupName;
+        if (userDirectoryNumber is not null)
+        {
+            results.Add(new PhoneCheckResult(
+                "User DN call pickup group",
+                "<none>",
+                Display(pickupGroupName),
+                string.IsNullOrWhiteSpace(pickupGroupName) ? PhoneCheckStatus.Passed : PhoneCheckStatus.Failed,
+                string.IsNullOrWhiteSpace(pickupGroupName)
+                    ? "No call pickup group is assigned."
+                    : $"Expected no call pickup group, but '{pickupGroupName}' is assigned."));
+        }
+
+        if (expectedCallingSearchSpaceActivationPolicy is not null)
+        {
+            results.Add(EqualsCheck(
+                "User DN CSS activation policy",
+                expectedCallingSearchSpaceActivationPolicy,
+                userDirectoryNumber?.CallingSearchSpaceActivationPolicy,
+                "Calling search space activation policy matches the configured default."));
+        }
+
+        if (expectedForwardCallingSearchSpaceName is not null)
+        {
+            results.AddRange(EvaluateCallForward(
+                "Forward All", userDirectoryNumber?.CallForwardAll,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward Busy", userDirectoryNumber?.CallForwardBusy,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward Busy Internal", userDirectoryNumber?.CallForwardBusyInternal,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward No Answer", userDirectoryNumber?.CallForwardNoAnswer,
+                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds));
+            results.AddRange(EvaluateCallForward(
+                "Forward No Answer Internal", userDirectoryNumber?.CallForwardNoAnswerInternal,
+                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds));
+            results.AddRange(EvaluateCallForward(
+                "Forward No Coverage", userDirectoryNumber?.CallForwardNoCoverage,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward No Coverage Internal", userDirectoryNumber?.CallForwardNoCoverageInternal,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward On Failure", userDirectoryNumber?.CallForwardOnFailure,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward Not Registered", userDirectoryNumber?.CallForwardNotRegistered,
+                expectedForwardCallingSearchSpaceName, null));
+            results.AddRange(EvaluateCallForward(
+                "Forward Not Registered Internal", userDirectoryNumber?.CallForwardNotRegisteredInternal,
+                expectedForwardCallingSearchSpaceName, null));
+        }
+
+        return results;
+    }
+
+    // Verifies a single call-forward variant forwards (not to voicemail) via the configured CSS,
+    // and - for the two "No Answer" variants - carries the configured ring duration.
+    private static IReadOnlyList<PhoneCheckResult> EvaluateCallForward(
+        string label,
+        CucmCallForwardSettings? settings,
+        string expectedCallingSearchSpaceName,
+        int? expectedRingDurationSeconds)
+    {
+        var results = new List<PhoneCheckResult>
+        {
+            EqualsCheck(
+                $"User DN {label} CSS",
+                expectedCallingSearchSpaceName,
+                settings?.CallingSearchSpaceName,
+                $"{label} calling search space matches the configured default."),
+        };
+        var forwardsToVoiceMail = settings?.ForwardToVoiceMail ?? false;
+        results.Add(new PhoneCheckResult(
+            $"User DN {label} target",
+            "Not forwarded to voicemail",
+            forwardsToVoiceMail ? "Forwarded to voicemail" : "Forwarded via CSS",
+            forwardsToVoiceMail ? PhoneCheckStatus.Failed : PhoneCheckStatus.Passed,
+            forwardsToVoiceMail
+                ? $"{label} is forwarding to voicemail instead of the configured calling search space."
+                : $"{label} is not forwarding to voicemail."));
+        if (expectedRingDurationSeconds is not null)
+        {
+            results.Add(new PhoneCheckResult(
+                $"User DN {label} ring duration",
+                $"{expectedRingDurationSeconds}s",
+                settings?.NoAnswerRingDurationSeconds is { } actual ? $"{actual}s" : "<missing>",
+                settings?.NoAnswerRingDurationSeconds == expectedRingDurationSeconds
+                    ? PhoneCheckStatus.Passed
+                    : PhoneCheckStatus.Failed,
+                settings?.NoAnswerRingDurationSeconds == expectedRingDurationSeconds
+                    ? $"{label} ring duration matches the configured default."
+                    : $"{label} ring duration does not match the configured default."));
+        }
         return results;
     }
 

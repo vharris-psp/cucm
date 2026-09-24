@@ -100,7 +100,8 @@ internal static class ClassroomApplyScopes
 internal sealed record ClassroomTemplateLayout(
     string PhoneTemplateName,
     int UserLineIndex,
-    int RoomLineIndex);
+    int RoomLineIndex,
+    int? SpeedDialIndex = null);
 
 internal sealed record ClassroomLinePlan(
     string Kind,
@@ -112,7 +113,7 @@ internal sealed record ClassroomLinePlan(
     string AlertingName,
     string Display,
     string Label,
-    string ExternalPhoneNumberMask,
+    string? ExternalPhoneNumberMask,
     string VoiceMailProfileName,
     string? OwnerUserId,
     bool CreateDirectoryNumber,
@@ -120,7 +121,13 @@ internal sealed record ClassroomLinePlan(
     bool UpdateDirectoryNumber,
     bool UpdateDisplay,
     bool UpdateLabel,
-    bool UpdateExternalMask);
+    bool UpdateExternalMask,
+    string? ForwardCallingSearchSpaceName = null,
+    string? CallingSearchSpaceActivationPolicy = null,
+    bool ClearCallPickupGroup = false,
+    int? NoAnswerRingDurationSeconds = null);
+
+internal sealed record ClassroomSpeedDialPlan(int Index, string Destination, string Label, bool Update);
 
 internal sealed record ClassroomPhoneChange(
     string Key,
@@ -139,6 +146,7 @@ internal sealed record ClassroomPhonePlan(
     string PhoneTemplateName,
     ClassroomLinePlan UserLine,
     ClassroomLinePlan RoomLine,
+    ClassroomSpeedDialPlan? AllCallSpeedDial,
     string? UserDidInventoryRoutePartitionName,
     IReadOnlyList<string> UserAssociatedDevices,
     string? PreviousOwnerUserId,
@@ -168,7 +176,10 @@ internal sealed record ClassroomPhonePlanInput(
     string RoomNumber,
     LineTemplate RoomTemplate,
     LineTemplate UserTemplate,
-    ClassroomApplyScope Scope = ClassroomApplyScope.Both);
+    ClassroomApplyScope Scope = ClassroomApplyScope.Both,
+    string? UserForwardCallingSearchSpaceName = null,
+    string? UserCallingSearchSpaceActivationPolicy = null,
+    int? UserNoAnswerRingDurationSeconds = null);
 
 internal static class ClassroomPhonePlanner
 {
@@ -196,14 +207,33 @@ internal static class ClassroomPhonePlanner
             .Select(slot => slot.Index)
             .Distinct()
             .ToArray();
+        var speedDialSlots = policy.Slots
+            .Where(slot => slot.Kind == TemplateComplianceSlotKind.SpeedDial)
+            .Select(slot => slot.Index)
+            .Distinct()
+            .ToArray();
         if (userSlots.Length != 1 || roomSlots.Length != 1 || userSlots[0] == roomSlots[0])
         {
             throw new InvalidOperationException(
                 $"Phone button template '{normalized}' must define exactly one user slot and exactly " +
                 "one room slot at different indexes in 'template-compliance-policies'.");
         }
+        if (speedDialSlots.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"Phone button template '{normalized}' must define at most one 'speeddial' slot in " +
+                "'template-compliance-policies'.");
+        }
+        if (speedDialSlots.Length == 1 &&
+            (speedDialSlots[0] == userSlots[0] || speedDialSlots[0] == roomSlots[0]))
+        {
+            throw new InvalidOperationException(
+                $"Phone button template '{normalized}' has a 'speeddial' slot at the same index as its " +
+                "user or room slot.");
+        }
 
-        return new ClassroomTemplateLayout(normalized, userSlots[0], roomSlots[0]);
+        return new ClassroomTemplateLayout(
+            normalized, userSlots[0], roomSlots[0], speedDialSlots.Length == 1 ? speedDialSlots[0] : null);
     }
 
     internal static ClassroomPhonePlan Create(ClassroomPhonePlanInput input)
@@ -242,7 +272,10 @@ internal static class ClassroomPhonePlanner
             buildingPattern.PhoneTemplateName ?? input.Phone.PhoneTemplateName,
             input.CompliancePolicies);
         ValidateLineTemplates(input.RoomTemplate, input.UserTemplate);
-        var roomTemplate = CreateClassroomRoomTemplate(input.RoomTemplate);
+        var roomTemplate = CreateClassroomRoomTemplate(input.RoomTemplate) with
+        {
+            ExternalPhoneNumberMask = Normalize(buildingPattern.RoomExternalPhoneNumberMask),
+        };
 
         EnsureRoomDirectoryNumberCanBeAssigned(
             input.RoomNumber,
@@ -277,7 +310,8 @@ internal static class ClassroomPhonePlanner
             $"{input.BuildingCode} Room {input.RoomNumber}",
             callingSearchSpaceName: null,
             ownerUserId: null,
-            userDisplayName: null);
+            userDisplayName: null,
+            requireExternalMask: false);
         var userLine = CreateLinePlan(
             "User",
             input.UserTemplate,
@@ -292,7 +326,12 @@ internal static class ClassroomPhonePlanner
             input.UserDid.Description,
             input.UserDid.CallingSearchSpaceName,
             userId,
-            userDisplayName);
+            userDisplayName,
+            requireExternalMask: true,
+            forwardCallingSearchSpaceName: Normalize(input.UserForwardCallingSearchSpaceName),
+            callingSearchSpaceActivationPolicy: Normalize(input.UserCallingSearchSpaceActivationPolicy),
+            clearCallPickupGroup: true,
+            noAnswerRingDurationSeconds: input.UserNoAnswerRingDurationSeconds);
         if (!includeRoom)
         {
             roomLine = ExcludeFromApply(roomLine);
@@ -366,6 +405,22 @@ internal static class ClassroomPhonePlanner
         var recordLocalAssignment =
             includeUser && input.UserDidUsesInventoryFallback && input.UserDid.Assignment is null;
 
+        ClassroomSpeedDialPlan? allCallSpeedDial = null;
+        if (includeRoom && layout.SpeedDialIndex is { } speedDialIndex)
+        {
+            var allCallNumber = Normalize(buildingPattern.AllCallNumber);
+            if (allCallNumber is not null)
+            {
+                const string allCallLabel = "All Call";
+                var currentSpeedDial = (input.Phone.SpeedDials ?? [])
+                    .FirstOrDefault(speedDial => speedDial.Index == speedDialIndex);
+                var needsUpdate = currentSpeedDial is null ||
+                    !EqualsValue(currentSpeedDial.Dirn, allCallNumber) ||
+                    !EqualsValue(currentSpeedDial.Label, allCallLabel);
+                allCallSpeedDial = new ClassroomSpeedDialPlan(speedDialIndex, allCallNumber, allCallLabel, needsUpdate);
+            }
+        }
+
         var changes = CreateChanges(
             input,
             layout,
@@ -379,7 +434,9 @@ internal static class ClassroomPhonePlanner
             previousOwnerUserId,
             removePreviousOwnerAssociation,
             input.UserDidUsesInventoryFallback,
-            recordLocalAssignment);
+            recordLocalAssignment,
+            allCallSpeedDial,
+            layout.SpeedDialIndex is not null && Normalize(buildingPattern.AllCallNumber) is null);
         return new ClassroomPhonePlan(
             phoneName,
             userId,
@@ -390,6 +447,7 @@ internal static class ClassroomPhonePlanner
             layout.PhoneTemplateName,
             userLine,
             roomLine,
+            allCallSpeedDial,
             input.UserDidUsesInventoryFallback ? input.UserDid.RoutePartitionName : null,
             userDevices,
             replaceOwner ? previousOwnerUserId : null,
@@ -436,7 +494,12 @@ internal static class ClassroomPhonePlanner
         string? description,
         string? callingSearchSpaceName,
         string? ownerUserId,
-        string? userDisplayName)
+        string? userDisplayName,
+        bool requireExternalMask = true,
+        string? forwardCallingSearchSpaceName = null,
+        string? callingSearchSpaceActivationPolicy = null,
+        bool clearCallPickupGroup = false,
+        int? noAnswerRingDurationSeconds = null)
     {
         string Resolve(string? value, string field) => Normalize(
             PhoneConfigurationChecks.SubstituteLineTemplateTokens(
@@ -456,13 +519,21 @@ internal static class ClassroomPhonePlanner
         var alertingName = ValidateCucmLineText(Resolve(template.AlertingName, "alertingName"), kind, "alertingName");
         var display = ValidateCucmLineText(Resolve(template.Display, "display"), kind, "display");
         var label = ValidateCucmLineText(Resolve(template.Label, "label"), kind, "label");
-        var externalMask = Resolve(template.ExternalPhoneNumberMask, "externalPhoneNumberMask");
+        // Unlike the other fields, a null template value means "not configured" (e.g. no per-building
+        // room mask yet) rather than an error - the field is simply left unmanaged on this line. Only
+        // the room line allows this; a user line's mask always comes from its template and is required.
+        var externalMask = template.ExternalPhoneNumberMask is null && !requireExternalMask
+            ? null
+            : Resolve(template.ExternalPhoneNumberMask, "externalPhoneNumberMask");
         var voiceMailProfileName = Resolve(template.VoiceMailProfileName, "voiceMailProfileName");
         var currentLine = phone.Lines.FirstOrDefault(line => line.Index == index);
         var assignLine = currentLine is null ||
             !string.Equals(currentLine.Pattern, pattern, StringComparison.Ordinal) ||
             !EqualsValue(currentLine.RoutePartitionName, routePartitionName) ||
             ownerUserId is not null && !EqualsValue(phone.OwnerUserName, ownerUserId);
+        var needsForwardPolicyUpdate = NeedsForwardPolicyUpdate(
+            directoryNumber, forwardCallingSearchSpaceName, callingSearchSpaceActivationPolicy,
+            clearCallPickupGroup, noAnswerRingDurationSeconds);
 
         return new ClassroomLinePlan(
             kind,
@@ -481,10 +552,15 @@ internal static class ClassroomPhonePlanner
             assignLine,
             directoryNumber is null ||
                 !EqualsValue(directoryNumber.AlertingName, alertingName) ||
-                !EqualsValue(directoryNumber.VoiceMailProfileName, voiceMailProfileName),
+                !EqualsValue(directoryNumber.VoiceMailProfileName, voiceMailProfileName) ||
+                needsForwardPolicyUpdate,
             !EqualsValue(currentLine?.Display, display) || !EqualsValue(currentLine?.DisplayAscii, display),
             !EqualsValue(currentLine?.Label, label),
-            !EqualsValue(currentLine?.ExternalPhoneNumberMask, externalMask));
+            externalMask is not null && !EqualsValue(currentLine?.ExternalPhoneNumberMask, externalMask),
+            forwardCallingSearchSpaceName,
+            callingSearchSpaceActivationPolicy,
+            clearCallPickupGroup,
+            noAnswerRingDurationSeconds);
     }
 
     private static IReadOnlyList<ClassroomPhoneChange> CreateChanges(
@@ -500,12 +576,14 @@ internal static class ClassroomPhonePlanner
         string? previousOwnerUserId,
         bool removePreviousOwnerAssociation,
         bool userDidUsesInventoryFallback,
-        bool recordLocalAssignment)
+        bool recordLocalAssignment,
+        ClassroomSpeedDialPlan? allCallSpeedDial,
+        bool allCallNotConfigured)
     {
         var roomCurrent = input.Phone.Lines.FirstOrDefault(line => line.Index == roomLine.Index);
         var userCurrent = input.Phone.Lines.FirstOrDefault(line => line.Index == userLine.Index);
-        return
-        [
+        var changes = new List<ClassroomPhoneChange>
+        {
             Change("phone.device-pool", "Device pool", input.Phone.DevicePoolName, devicePoolName, "Update"),
             Change("phone.button-template", "Phone button template", input.Phone.PhoneTemplateName,
                 layout.PhoneTemplateName, "Update"),
@@ -521,8 +599,17 @@ internal static class ClassroomPhonePlanner
             Change("room.caller-id", "Room caller ID", roomCurrent?.Display,
                 roomLine.Display, "Update", includeRoom),
             Change("room.label", "Room label", roomCurrent?.Label, roomLine.Label, "Update", includeRoom),
-            Change("room.external-mask", "Room external mask", roomCurrent?.ExternalPhoneNumberMask,
-                roomLine.ExternalPhoneNumberMask, "Update", includeRoom),
+            new ClassroomPhoneChange(
+                "room.external-mask",
+                "Room external mask",
+                Display(roomCurrent?.ExternalPhoneNumberMask),
+                !includeRoom ? "<Not applied>"
+                    : roomLine.ExternalPhoneNumberMask is null ? "<Not configured for building>"
+                    : Display(roomLine.ExternalPhoneNumberMask),
+                !includeRoom ? "Skip (excluded)"
+                    : roomLine.ExternalPhoneNumberMask is null ? "Configure via 'configure buildings'"
+                    : EqualsValue(roomCurrent?.ExternalPhoneNumberMask, roomLine.ExternalPhoneNumberMask)
+                        ? "No change" : "Update"),
             Change("room.voicemail", "Room voicemail profile", input.RoomDirectoryNumber?.VoiceMailProfileName,
                 roomLine.VoiceMailProfileName, "Update", includeRoom),
             Change("user.dn", $"User line {userLine.Index} DN", userCurrent?.Pattern,
@@ -549,6 +636,13 @@ internal static class ClassroomPhonePlanner
             Change("user.owner", "Phone and user-line owner", input.Phone.OwnerUserName,
                 input.User.UserId, "Set owner", includeUser),
             new ClassroomPhoneChange(
+                "user.dn-association",
+                "User DN association (Users Associated with Line)",
+                "Not tracked",
+                includeUser ? Display(input.User.UserId) : "<Not applied>",
+                !includeUser ? "Skip (excluded)"
+                    : userLine.CreateDirectoryNumber || userLine.UpdateDirectoryNumber ? "Set" : "No change"),
+            new ClassroomPhoneChange(
                 "user.association",
                 "Selected user device association",
                 addUserAssociation ? "Not associated" : "Associated",
@@ -572,7 +666,23 @@ internal static class ClassroomPhonePlanner
                         ? $"{input.Phone.Name} line {userLine.Index}"
                         : "Not used",
                 !includeUser ? "Skip (excluded)" : recordLocalAssignment ? "Record" : "No change"),
-        ];
+        };
+        if (layout.SpeedDialIndex is { } speedDialIndex)
+        {
+            var currentSpeedDial = (input.Phone.SpeedDials ?? [])
+                .FirstOrDefault(speedDial => speedDial.Index == speedDialIndex);
+            changes.Add(new ClassroomPhoneChange(
+                "phone.all-call",
+                $"All Call speed dial (button {speedDialIndex})",
+                Display(currentSpeedDial?.Dirn),
+                allCallSpeedDial is not null ? allCallSpeedDial.Destination
+                    : allCallNotConfigured ? "<Not configured for building>"
+                    : "<none>",
+                allCallSpeedDial is not null ? (allCallSpeedDial.Update ? "Update" : "No change")
+                    : allCallNotConfigured ? "Configure via 'configure buildings'"
+                    : "No change"));
+        }
+        return changes;
     }
 
     private static ClassroomPhoneChange Change(
@@ -686,6 +796,55 @@ internal static class ClassroomPhonePlanner
     private static bool EqualsValue(string? left, string? right) =>
         string.Equals(Normalize(left), Normalize(right), StringComparison.OrdinalIgnoreCase);
 
+    // True when any configured forward-CSS/activation-policy/pickup-group/ring-duration default
+    // doesn't already match the DN's current state, so the caller knows an updateLine is needed.
+    private static bool NeedsForwardPolicyUpdate(
+        CucmDirectoryNumber? directoryNumber,
+        string? forwardCallingSearchSpaceName,
+        string? callingSearchSpaceActivationPolicy,
+        bool clearCallPickupGroup,
+        int? noAnswerRingDurationSeconds)
+    {
+        if (forwardCallingSearchSpaceName is null &&
+            callingSearchSpaceActivationPolicy is null &&
+            !clearCallPickupGroup)
+        {
+            return false;
+        }
+        if (directoryNumber is null)
+        {
+            return true;
+        }
+        if (callingSearchSpaceActivationPolicy is not null &&
+            !EqualsValue(directoryNumber.CallingSearchSpaceActivationPolicy, callingSearchSpaceActivationPolicy))
+        {
+            return true;
+        }
+        if (clearCallPickupGroup && !string.IsNullOrWhiteSpace(directoryNumber.CallPickupGroupName))
+        {
+            return true;
+        }
+        if (forwardCallingSearchSpaceName is null)
+        {
+            return false;
+        }
+        bool Mismatched(CucmCallForwardSettings? settings, int? expectedDuration = null) =>
+            settings is null ||
+            settings.ForwardToVoiceMail ||
+            !EqualsValue(settings.CallingSearchSpaceName, forwardCallingSearchSpaceName) ||
+            (expectedDuration is not null && settings.NoAnswerRingDurationSeconds != expectedDuration);
+        return Mismatched(directoryNumber.CallForwardAll) ||
+            Mismatched(directoryNumber.CallForwardBusy) ||
+            Mismatched(directoryNumber.CallForwardBusyInternal) ||
+            Mismatched(directoryNumber.CallForwardNoAnswer, noAnswerRingDurationSeconds) ||
+            Mismatched(directoryNumber.CallForwardNoAnswerInternal, noAnswerRingDurationSeconds) ||
+            Mismatched(directoryNumber.CallForwardNoCoverage) ||
+            Mismatched(directoryNumber.CallForwardNoCoverageInternal) ||
+            Mismatched(directoryNumber.CallForwardOnFailure) ||
+            Mismatched(directoryNumber.CallForwardNotRegistered) ||
+            Mismatched(directoryNumber.CallForwardNotRegisteredInternal);
+    }
+
     private static string? Normalize(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
@@ -718,6 +877,11 @@ internal interface IClassroomPhoneWriter
     Task UpdateLineExternalMaskAsync(
         string phoneName,
         ClassroomLinePlan line,
+        CancellationToken cancellationToken);
+
+    Task UpdateAllCallSpeedDialAsync(
+        string phoneName,
+        ClassroomSpeedDialPlan speedDial,
         CancellationToken cancellationToken);
 
     Task UpdateUserAssociationAsync(ClassroomPhonePlan plan, CancellationToken cancellationToken);
@@ -772,6 +936,14 @@ internal static class ClassroomPhoneExecutor
             await ExecuteAsync(
                 "phone-profile",
                 ct => writer.UpdatePhoneProfileAsync(plan, ct),
+                completed,
+                cancellationToken);
+        }
+        if (plan.AllCallSpeedDial is { Update: true } allCallSpeedDial)
+        {
+            await ExecuteAsync(
+                "all-call-speed-dial",
+                ct => writer.UpdateAllCallSpeedDialAsync(plan.PhoneName, allCallSpeedDial, ct),
                 completed,
                 cancellationToken);
         }
@@ -953,14 +1125,34 @@ internal sealed class CucmClassroomPhoneWriter(
         ClassroomLinePlan line,
         CancellationToken cancellationToken)
     {
+        var forward = BuildForwardSettings(line);
         await cucm.AddDirectoryNumberAsync(
             new CucmDirectoryNumberCreateRequest(
                 line.Pattern,
                 line.RoutePartitionName,
                 line.Description,
                 line.CallingSearchSpaceName,
-                line.VoiceMailProfileName),
+                line.VoiceMailProfileName,
+                AssociatedUserId: line.OwnerUserId,
+                CallForwardBusy: forward.Busy,
+                CallForwardBusyInternal: forward.BusyInternal,
+                CallForwardNoAnswer: forward.NoAnswer,
+                CallForwardNoAnswerInternal: forward.NoAnswerInternal,
+                CallForwardNoCoverage: forward.NoCoverage,
+                CallForwardNoCoverageInternal: forward.NoCoverageInternal,
+                CallForwardOnFailure: forward.OnFailure,
+                CallForwardNotRegistered: forward.NotRegistered,
+                CallForwardNotRegisteredInternal: forward.NotRegisteredInternal,
+                CallingSearchSpaceActivationPolicy: line.CallingSearchSpaceActivationPolicy,
+                ClearCallPickupGroup: line.ClearCallPickupGroup),
             cancellationToken);
+        if (forward.All is not null)
+        {
+            await cucm.UpdateDirectoryNumberAsync(
+                new CucmDirectoryNumberUpdateRequest(
+                    line.Pattern, line.RoutePartitionName, CallForwardAll: forward.All),
+                cancellationToken);
+        }
     }
 
     public Task AssignLineAsync(
@@ -984,14 +1176,55 @@ internal sealed class CucmClassroomPhoneWriter(
 
     public Task UpdateDirectoryNumberAsync(
         ClassroomLinePlan line,
-        CancellationToken cancellationToken) =>
-        cucm.UpdateDirectoryNumberAsync(
+        CancellationToken cancellationToken)
+    {
+        var forward = BuildForwardSettings(line);
+        return cucm.UpdateDirectoryNumberAsync(
             new CucmDirectoryNumberUpdateRequest(
                 line.Pattern,
                 line.RoutePartitionName,
                 VoiceMailProfileName: line.VoiceMailProfileName,
-                AlertingName: line.AlertingName),
+                AlertingName: line.AlertingName,
+                AssociatedUserId: line.OwnerUserId,
+                CallForwardAll: forward.All,
+                CallForwardBusy: forward.Busy,
+                CallForwardBusyInternal: forward.BusyInternal,
+                CallForwardNoAnswer: forward.NoAnswer,
+                CallForwardNoAnswerInternal: forward.NoAnswerInternal,
+                CallForwardNoCoverage: forward.NoCoverage,
+                CallForwardNoCoverageInternal: forward.NoCoverageInternal,
+                CallForwardOnFailure: forward.OnFailure,
+                CallForwardNotRegistered: forward.NotRegistered,
+                CallForwardNotRegisteredInternal: forward.NotRegisteredInternal,
+                CallingSearchSpaceActivationPolicy: line.CallingSearchSpaceActivationPolicy,
+                ClearCallPickupGroup: line.ClearCallPickupGroup),
             cancellationToken);
+    }
+
+    // Applies the same configured CSS (never Voice Mail) to every forward variant; only the two
+    // "No Answer" variants also carry the configured ring duration. "All" is handled separately by
+    // the caller since 'addLine' can't set it directly (a follow-up 'updateLine' is required).
+    private static (
+        CucmCallForwardSettings? All,
+        CucmCallForwardSettings? Busy,
+        CucmCallForwardSettings? BusyInternal,
+        CucmCallForwardSettings? NoAnswer,
+        CucmCallForwardSettings? NoAnswerInternal,
+        CucmCallForwardSettings? NoCoverage,
+        CucmCallForwardSettings? NoCoverageInternal,
+        CucmCallForwardSettings? OnFailure,
+        CucmCallForwardSettings? NotRegistered,
+        CucmCallForwardSettings? NotRegisteredInternal) BuildForwardSettings(ClassroomLinePlan line)
+    {
+        if (line.ForwardCallingSearchSpaceName is not { } css)
+        {
+            return (null, null, null, null, null, null, null, null, null, null);
+        }
+        var settings = new CucmCallForwardSettings(ForwardToVoiceMail: false, CallingSearchSpaceName: css);
+        var noAnswerSettings = settings with { NoAnswerRingDurationSeconds = line.NoAnswerRingDurationSeconds };
+        return (settings, settings, settings, noAnswerSettings, noAnswerSettings, settings, settings, settings,
+            settings, settings);
+    }
 
     public Task UpdateLineDisplayAsync(
         string phoneName,
@@ -1018,6 +1251,17 @@ internal sealed class CucmClassroomPhoneWriter(
             phoneName,
             line.Index,
             line.ExternalPhoneNumberMask,
+            cancellationToken);
+
+    public Task UpdateAllCallSpeedDialAsync(
+        string phoneName,
+        ClassroomSpeedDialPlan speedDial,
+        CancellationToken cancellationToken) =>
+        cucm.UpdatePhoneSpeedDialAsync(
+            phoneName,
+            speedDial.Index,
+            speedDial.Destination,
+            speedDial.Label,
             cancellationToken);
 
     public Task UpdateUserAssociationAsync(

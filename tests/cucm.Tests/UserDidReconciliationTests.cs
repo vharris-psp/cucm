@@ -100,6 +100,17 @@ public sealed class UserDidReconciliationTests
     }
 
     [Fact]
+    public void AReservedExtensionIsExcludedFromTheUntrackedAnomalyList()
+    {
+        var result = UserDidReconciler.Resolve(
+            [new UserDid("1000", "Users-PT", null, null, null)],
+            [Line("1000", "Users-PT"), Line("9999", "Users-PT")],
+            [new ReservedExtension("9999", "Users-PT", "Known internal extension.", DateTimeOffset.UnixEpoch)]);
+
+        Assert.Empty(result.Untracked);
+    }
+
+    [Fact]
     public void ParsePartitionsSplitsTrimsAndDeduplicates()
     {
         var partitions = UserDidReconciler.ParsePartitions(" AllPhones ,AllPhones; Rooms-PT ");

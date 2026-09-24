@@ -86,4 +86,126 @@ public sealed class PhoneConfigurationChecksTests
         Assert.Equal("HS-Rooms", results[3].Actual);
     }
 
+    [Fact]
+    public void EvaluateClassroomPassesWhenForwardPickupAndVoicemailMatchExpectations()
+    {
+        var (phone, owner, policies, buildings) = CreateClassroomFixture();
+        var forwardSettings = new VSharp.Cucm.Models.CucmCallForwardSettings(
+            ForwardToVoiceMail: false, CallingSearchSpaceName: "Subscribe");
+        var noAnswerSettings = forwardSettings with { NoAnswerRingDurationSeconds = 20 };
+        var userDn = new VSharp.Cucm.Models.CucmDirectoryNumber(
+            "dn-uuid", "2112", null, null, "AllPhones", null, "VM-Profile", forwardSettings,
+            CallForwardBusy: forwardSettings,
+            CallForwardBusyInternal: forwardSettings,
+            CallForwardNoAnswer: noAnswerSettings,
+            CallForwardNoAnswerInternal: noAnswerSettings,
+            CallForwardNoCoverage: forwardSettings,
+            CallForwardNoCoverageInternal: forwardSettings,
+            CallForwardOnFailure: forwardSettings,
+            CallForwardNotRegistered: forwardSettings,
+            CallForwardNotRegisteredInternal: forwardSettings,
+            CallingSearchSpaceActivationPolicy: "Use System Default",
+            CallPickupGroupName: null);
+
+        var results = PhoneConfigurationChecks.EvaluateClassroom(
+            phone,
+            owner,
+            policies,
+            buildings,
+            userDn,
+            expectedForwardCallingSearchSpaceName: "Subscribe",
+            expectedCallingSearchSpaceActivationPolicy: "Use System Default",
+            expectedNoAnswerRingDurationSeconds: 20,
+            availableVoiceMailProfiles: ["VM-Profile"]);
+
+        Assert.All(results, result => Assert.Equal(PhoneCheckStatus.Passed, result.Status));
+    }
+
+    [Fact]
+    public void EvaluateClassroomFailsWhenPickupGroupSetOrVoicemailUnknownOrForwardsToVoicemail()
+    {
+        var (phone, owner, policies, buildings) = CreateClassroomFixture();
+        var badForward = new VSharp.Cucm.Models.CucmCallForwardSettings(
+            ForwardToVoiceMail: true, CallingSearchSpaceName: "WrongCss");
+        var userDn = new VSharp.Cucm.Models.CucmDirectoryNumber(
+            "dn-uuid", "2112", null, null, "AllPhones", null, "Unknown-Profile", badForward,
+            CallForwardBusy: badForward,
+            CallingSearchSpaceActivationPolicy: "Custom",
+            CallPickupGroupName: "PickupGroup1");
+
+        var results = PhoneConfigurationChecks.EvaluateClassroom(
+            phone,
+            owner,
+            policies,
+            buildings,
+            userDn,
+            expectedForwardCallingSearchSpaceName: "Subscribe",
+            expectedCallingSearchSpaceActivationPolicy: "Use System Default",
+            expectedNoAnswerRingDurationSeconds: 20,
+            availableVoiceMailProfiles: ["VM-Profile"]);
+
+        Assert.Contains(results, r => r.Name == "User DN voicemail profile" && r.Status == PhoneCheckStatus.Failed);
+        Assert.Contains(results, r => r.Name == "User DN call pickup group" && r.Status == PhoneCheckStatus.Failed);
+        Assert.Contains(
+            results, r => r.Name == "User DN CSS activation policy" && r.Status == PhoneCheckStatus.Failed);
+        Assert.Contains(results, r => r.Name == "User DN Forward All CSS" && r.Status == PhoneCheckStatus.Failed);
+        Assert.Contains(results, r => r.Name == "User DN Forward All target" && r.Status == PhoneCheckStatus.Failed);
+        Assert.Contains(
+            results, r => r.Name == "User DN Forward Busy target" && r.Status == PhoneCheckStatus.Failed);
+    }
+
+    private static (
+        VSharp.Cucm.Models.CucmPhone Phone,
+        VSharp.Cucm.Models.CucmUser Owner,
+        Dictionary<string, TemplateCompliancePolicy> Policies,
+        Dictionary<string, BuildingPattern> Buildings) CreateClassroomFixture()
+    {
+        var phone = new VSharp.Cucm.Models.CucmPhone(
+            "phone-uuid",
+            "SEP0001",
+            null,
+            "Cisco 7841",
+            "Cisco 7841",
+            "SIP",
+            "vharris",
+            [
+                new VSharp.Cucm.Models.CucmPhoneLineAppearance(
+                    1, "2112", "AllPhones", "Victor Harris", "Victor Harris", "Victor Harris"),
+                new VSharp.Cucm.Models.CucmPhoneLineAppearance(
+                    3, "130", "HS-Rooms", "PHS Room 130", "PHS Room 130", "PHS Room 130"),
+            ],
+            "HighSchool",
+            "Standard 7841 SIP 1DN-1SdBLF-2DN");
+        var owner = new VSharp.Cucm.Models.CucmUser(
+            "user-uuid",
+            "vharris",
+            "Victor",
+            null,
+            "Harris",
+            "Victor Harris",
+            null,
+            null,
+            "2112",
+            null,
+            ["SEP0001"],
+            new VSharp.Cucm.Models.CucmUserPrimaryExtension("2112", "AllPhones"));
+        var policies = new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Standard 7841 SIP 1DN-1SdBLF-2DN"] = new TemplateCompliancePolicy(
+                [
+                    new TemplateComplianceSlot(1, TemplateComplianceSlotKind.User),
+                    new TemplateComplianceSlot(3, TemplateComplianceSlotKind.Room),
+                ]),
+        };
+        var buildings = new Dictionary<string, BuildingPattern>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PHS"] = new BuildingPattern(
+                "HS-Rooms",
+                ["HighSchool"],
+                "Standard 7841 SIP 1DN-1SdBLF-2DN",
+                "HighSchool"),
+        };
+        return (phone, owner, policies, buildings);
+    }
+
 }

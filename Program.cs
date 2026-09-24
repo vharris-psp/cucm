@@ -80,6 +80,24 @@ return await ModuleApplication
             "Without this setting, DID commands fall back to the local inventory's recorded " +
             "assignments only.",
         required: false)
+    .Setting(
+        "user-did-forward-css",
+        "Calling search space applied to every call-forward variant (All, Busy, No Answer, No " +
+            "Coverage, On Failure, Not Registered - internal and external) on a classroom user's " +
+            "DN. Forward-to-voicemail is always left off in favor of this CSS. Omit to leave a " +
+            "classroom user line's forward settings unmanaged.",
+        required: false)
+    .Setting(
+        "user-did-css-activation-policy",
+        "Calling search space activation policy applied to a classroom user's DN " +
+            "(e.g. 'Use System Default').",
+        required: false,
+        defaultValue: "Use System Default")
+    .Setting(
+        "user-did-no-answer-ring-duration",
+        "Ring duration, in seconds, applied to the 'No Answer' and 'No Answer Internal' call " +
+            "forward settings on a classroom user's DN. Omit to leave the ring duration unmanaged.",
+        required: false)
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
     .Default(
@@ -373,8 +391,7 @@ static async ValueTask<ModuleCommandOutcome> ProvisionAsync(ModuleContext contex
                 throw new InvalidOperationException("Provisioning state is missing a user ID.");
 
             var user = await RequireUserAsync(cucm, createUserId, context.CancellationToken);
-            var did = await RequireAvailableUserDidAsync(
-                context, cucm, createPattern, createPartition);
+            var did = await RequireAvailableUserDidAsync(context, cucm, createPattern, createPartition);
             var previousOwnerUserId = createState.PreviousOwnerUserName;
             var replacingOwner = previousOwnerUserId is not null &&
                 !previousOwnerUserId.Equals(createUserId, StringComparison.OrdinalIgnoreCase);
@@ -1929,12 +1946,42 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                 var owner = string.IsNullOrWhiteSpace(phone.OwnerUserName)
                     ? null
                     : await cucm.GetUserAsync(phone.OwnerUserName, context.CancellationToken);
+                var userLineIndexForCheck = PhoneConfigurationChecks.TryResolveClassroomUserLineIndex(
+                    phone, compliancePolicies);
+                var userLineForCheck = userLineIndexForCheck is { } userLineIndex
+                    ? phone.Lines.FirstOrDefault(line => line.Index == userLineIndex)
+                    : null;
+                var userDirectoryNumber = string.IsNullOrWhiteSpace(userLineForCheck?.Pattern)
+                    ? null
+                    : await cucm.GetDirectoryNumberAsync(
+                        userLineForCheck.Pattern,
+                        userLineForCheck.RoutePartitionName,
+                        context.CancellationToken);
+                var expectedForwardCss = Normalize(context.Configuration.GetValueOrDefault("user-did-forward-css"));
+                var expectedActivationPolicy =
+                    Normalize(context.Configuration.GetValueOrDefault("user-did-css-activation-policy"));
+                var expectedRingDuration = int.TryParse(
+                    context.Configuration.GetValueOrDefault("user-did-no-answer-ring-duration"),
+                    out var ringDuration)
+                    ? ringDuration
+                    : (int?)null;
+                var voiceMailProfiles = new List<string>();
+                await foreach (var resource in cucm.ListVoiceMailProfilesAsync(
+                    cancellationToken: context.CancellationToken))
+                {
+                    voiceMailProfiles.Add(resource.Name);
+                }
                 await context.ReportProgressAsync("Evaluating classroom configuration", 2, 3);
                 results = PhoneConfigurationChecks.EvaluateClassroom(
                     phone,
                     owner,
                     compliancePolicies,
-                    buildingPatterns);
+                    buildingPatterns,
+                    userDirectoryNumber,
+                    expectedForwardCss,
+                    expectedActivationPolicy,
+                    expectedRingDuration,
+                    voiceMailProfiles);
             }
             else
             {
@@ -2126,8 +2173,7 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
             int.TryParse(didIndexText, out var didIndex) && didIndex > 0)
         {
             return ModuleCommandResult.Render(
-                await CreateAvailableUserDidsResponseAsync(
-                    context, cucm, phoneNameForDids, didIndex));
+                await CreateAvailableUserDidsResponseAsync(context, cucm, phoneNameForDids, didIndex));
         }
         if (context.Arguments is
             ["did-review", var phoneNameForDidReview, var reviewIndexText, var reviewPattern, var reviewPartition] &&
@@ -2408,8 +2454,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         user.TelephoneNumber,
                         user.UserId,
                         classroomPhoneName,
-                        primaryExtensionPattern: null,
-                        primaryExtensionRoutePartitionName: null);
+                        primaryExtensionPattern: user.PrimaryExtension?.Pattern,
+                        primaryExtensionRoutePartitionName: user.PrimaryExtension?.RoutePartitionName);
                     status = selection.UsesInventoryFallback
                         ? "Ready (unused DN fallback)"
                         : "Ready (assigned user DN)";
@@ -2546,7 +2592,75 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                     $"({ClassroomApplyScopes.Describe(classroomReviewScope)})",
                 ["FIELD", "CURRENT", "TARGET", "ACTION"],
                 reviewRows,
+                SubmitMode: ModuleTableSubmitMode.Save,
+                QuickActions:
+                [
+                    new ModuleQuickAction(
+                        "F1",
+                        "Remove unspecified lines",
+                        [
+                            "phones", "classroom-unmanaged-lines", classroomReviewPhoneName,
+                            plan.UserLine.Index.ToString(), plan.RoomLine.Index.ToString(),
+                        ]),
+                ]));
+        }
+        if (context.Arguments is
+            [
+                "classroom-unmanaged-lines", var unmanagedPhoneName, var unmanagedUserIndexText,
+                var unmanagedRoomIndexText,
+            ] &&
+            int.TryParse(unmanagedUserIndexText, out var unmanagedUserIndex) &&
+            int.TryParse(unmanagedRoomIndexText, out var unmanagedRoomIndex))
+        {
+            var unmanagedPhone = await RequirePhoneAsync(cucm, unmanagedPhoneName, context.CancellationToken);
+            var unmanagedLines = unmanagedPhone.Lines
+                .Where(line => line.Index != unmanagedUserIndex && line.Index != unmanagedRoomIndex &&
+                    !string.IsNullOrWhiteSpace(line.Pattern))
+                .OrderBy(line => line.Index)
+                .ToArray();
+            if (unmanagedLines.Length == 0)
+            {
+                return ModuleCommandResult.Ok(
+                    $"No unspecified lines were found on {unmanagedPhoneName} (only the classroom " +
+                    "user/room slots are in use).");
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Unspecified lines on {unmanagedPhoneName}",
+                ["SLOT", "NUMBER", "PARTITION"],
+                unmanagedLines
+                    .Select(line => new ModuleTableRow(
+                        line.Index.ToString(),
+                        [line.Index.ToString(), Clean(line.Pattern), DisplayPartition(line.RoutePartitionName)]))
+                    .Append(new ModuleTableRow(
+                        "remove-all",
+                        [
+                            "Remove all listed above",
+                            $"{unmanagedLines.Length} line(s)",
+                            "Unassign from this phone (the DN itself is not deleted)",
+                        ],
+                        [
+                            "phones", "classroom-unmanaged-lines-apply", unmanagedPhoneName,
+                            string.Join(",", unmanagedLines.Select(line => line.Index)),
+                        ]))
+                    .ToArray(),
                 SubmitMode: ModuleTableSubmitMode.Save));
+        }
+        if (context.Arguments is ["classroom-unmanaged-lines-apply", var unmanagedApplyPhoneName, var unmanagedIndexesRaw])
+        {
+            var didStore = new UserDidStore(context.DataDirectory);
+            var removedCount = 0;
+            foreach (var unmanagedIndexPart in unmanagedIndexesRaw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!int.TryParse(unmanagedIndexPart, out var index))
+                {
+                    continue;
+                }
+                await cucm.RemovePhoneLineAsync(unmanagedApplyPhoneName, index, context.CancellationToken);
+                await didStore.ClearAssignmentAsync(unmanagedApplyPhoneName, index, context.CancellationToken);
+                removedCount++;
+            }
+            return ModuleCommandResult.Ok(
+                $"Removed {removedCount} unspecified line(s) from {unmanagedApplyPhoneName}.");
         }
         if (context.Arguments is
             [
@@ -3437,6 +3551,9 @@ static async Task<ModuleResponse> CreateAvailableUserDidsResponseAsync(
         rows);
 }
 
+// Live-reconciles against CUCM's configured DID scan partition(s) when 'user-did-scan-partitions'
+// is set, so a DID already in use or reserved by function is never offered; otherwise falls back
+// to the local inventory's recorded assignments only.
 static async Task<IReadOnlyList<UserDid>> LoadAvailableUserDidsAsync(
     ModuleContext context,
     CucmService cucm)
@@ -3453,11 +3570,22 @@ static async Task<IReadOnlyList<UserDid>> LoadAvailableUserDidsAsync(
     return reconciliation.Available.ToArray();
 }
 
+static string DisplayLiveStatus(UserDidLiveStatus status) => status switch
+{
+    UserDidLiveStatus.Available => "AVAILABLE",
+    UserDidLiveStatus.Reserved => "RESERVED",
+    UserDidLiveStatus.Anomaly => "ANOMALY",
+    _ => status.ToString().ToUpperInvariant(),
+};
+
 static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context)
 {
     try
     {
         var store = new UserDidStore(context.DataDirectory);
+        var reservedStore = new ReservedExtensionStore(context.DataDirectory);
+        var scanPartitions = UserDidReconciler.ParsePartitions(
+            context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
         if (context.Arguments.Count == 0)
         {
             return ModuleCommandResult.Render(new ModuleTableResponse(
@@ -3480,13 +3608,30 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                         "replace",
                         ["Replace", "Replace the unassigned inventory after Save confirmation"],
                         ["dids", "replace"]),
+                    new ModuleTableRow(
+                        "reserve",
+                        [
+                            "Reserve current anomalies",
+                            "Acknowledge numbers found in CUCM's scanned partition(s) that aren't " +
+                                "tracked DIDs, so they stop being reported",
+                        ],
+                        ["dids", "reserve"]),
+                    new ModuleTableRow(
+                        "reserved",
+                        ["Reserved", "Browse acknowledged non-DID numbers"],
+                        ["dids", "reserved"]),
+                    new ModuleTableRow(
+                        "clear",
+                        [
+                            "Clear stale assignment",
+                            "Free a DID stuck with a stale local phone/user assignment",
+                        ],
+                        ["dids", "clear-prompt"]),
                 ]));
         }
         if (context.Arguments is ["list"])
         {
             var dids = await store.LoadAsync(context.CancellationToken);
-            var scanPartitions = UserDidReconciler.ParsePartitions(
-                context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
             if (scanPartitions.Count == 0)
             {
                 return ModuleCommandResult.Render(new ModuleTableResponse(
@@ -3503,13 +3648,16 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                             Clean(did.Assignment?.UserId),
                             Clean(did.Assignment?.PhoneName),
                             did.Assignment?.LineIndex.ToString() ?? string.Empty,
-                        ])).ToArray(),
-                    Selectable: false));
+                        ],
+                        ["dids", "detail", did.Pattern, did.RoutePartitionName ?? string.Empty]))
+                        .ToArray(),
+                    Selectable: true));
             }
 
             using var cucm = await CreateCucmAsync(context);
+            var reservedExtensions = await reservedStore.LoadAsync(context.CancellationToken);
             var reconciliation = await UserDidReconciler.ResolveFromCucmAsync(
-                cucm, dids, scanPartitions, context.CancellationToken);
+                cucm, dids, scanPartitions, context.CancellationToken, reservedExtensions);
             var rows = reconciliation.Tracked
                 .Select(entry => new ModuleTableRow(
                     $"{entry.Did.Pattern}:{entry.Did.RoutePartitionName}",
@@ -3518,7 +3666,8 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                         DisplayPartition(entry.Did.RoutePartitionName),
                         DisplayLiveStatus(entry.Status),
                         entry.Reason,
-                    ]))
+                    ],
+                    ["dids", "detail", entry.Did.Pattern, entry.Did.RoutePartitionName ?? string.Empty]))
                 .Concat(reconciliation.Untracked.Select(anomaly => new ModuleTableRow(
                     $"untracked:{anomaly.Pattern}:{anomaly.RoutePartitionName}",
                     [
@@ -3526,14 +3675,15 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                         DisplayPartition(anomaly.RoutePartitionName),
                         DisplayLiveStatus(UserDidLiveStatus.Anomaly),
                         anomaly.Reason,
-                    ])))
+                    ],
+                    ["dids", "reserve-one-review", anomaly.Pattern, anomaly.RoutePartitionName])))
                 .ToArray();
             return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"Local user DN inventory, reconciled against CUCM partition(s) " +
                     $"{string.Join(", ", scanPartitions)}",
                 ["DID", "PARTITION", "STATUS", "REASON"],
                 rows,
-                Selectable: false));
+                Selectable: true));
         }
         if (context.Arguments is ["available"])
         {
@@ -3547,6 +3697,202 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
                     [did.Pattern, DisplayPartition(did.RoutePartitionName), Clean(did.Description)]))
                     .ToArray(),
                 Selectable: false));
+        }
+        if (context.Arguments is ["reserved"])
+        {
+            var reservedExtensions = await reservedStore.LoadAsync(context.CancellationToken);
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                "Reserved (acknowledged non-DID) numbers",
+                ["PATTERN", "PARTITION", "NOTE", "RECORDED"],
+                reservedExtensions.Select(extension => new ModuleTableRow(
+                    $"{extension.Pattern}:{extension.RoutePartitionName}",
+                    [
+                        extension.Pattern,
+                        extension.RoutePartitionName,
+                        Clean(extension.Note),
+                        extension.RecordedAt.ToString("u"),
+                    ])).ToArray(),
+                Selectable: false));
+        }
+        if (context.Arguments is ["detail", var detailPattern, var detailPartitionRaw])
+        {
+            var detailPartition = Normalize(detailPartitionRaw);
+            var did = (await store.LoadAsync(context.CancellationToken)).FirstOrDefault(candidate =>
+                candidate.Pattern.Equals(detailPattern, StringComparison.Ordinal) &&
+                string.Equals(candidate.RoutePartitionName, detailPartition, StringComparison.Ordinal));
+            if (did is null)
+            {
+                throw new InvalidOperationException(
+                    $"User DID '{detailPattern}' is not present in the local inventory.");
+            }
+            var detailRows = new List<ModuleTableRow>
+            {
+                new("pattern", ["Pattern", did.Pattern]),
+                new("partition", ["Partition", DisplayPartition(did.RoutePartitionName)]),
+                new(
+                    "assignment",
+                    [
+                        "Local assignment",
+                        did.Assignment is null
+                            ? "None"
+                            : $"{did.Assignment.PhoneName} line {did.Assignment.LineIndex}" +
+                                (did.Assignment.UserId is null
+                                    ? string.Empty
+                                    : $" (user '{did.Assignment.UserId}')") +
+                                $", recorded {did.Assignment.AssignedAt:u}",
+                    ]),
+            };
+            if (did.Assignment is not null)
+            {
+                detailRows.Add(new ModuleTableRow(
+                    "clear",
+                    [
+                        "Clear local assignment",
+                        "Use when the recorded phone/user is stale (fixes a DID stuck as assigned)",
+                    ],
+                    ["dids", "clear-review", did.Pattern, did.RoutePartitionName ?? string.Empty]));
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"User DN {did.Pattern} ({DisplayPartition(did.RoutePartitionName)})",
+                ["FIELD", "VALUE"],
+                detailRows));
+        }
+        if (context.Arguments is ["clear-prompt"])
+        {
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+                "Clear a stale DID assignment",
+                "Four-digit DN pattern",
+                ["dids", "clear-partition-prompt"]));
+        }
+        if (context.Arguments is ["clear-partition-prompt", var clearPromptPattern])
+        {
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+                $"Clear stale assignment for {clearPromptPattern}",
+                "Route partition (leave blank if none)",
+                ["dids", "clear-review", clearPromptPattern],
+                AllowEmpty: true));
+        }
+        if (context.Arguments is ["clear-review", var clearPattern, var clearPartitionRaw])
+        {
+            var clearPartition = Normalize(clearPartitionRaw);
+            var did = (await store.LoadAsync(context.CancellationToken)).FirstOrDefault(candidate =>
+                candidate.Pattern.Equals(clearPattern, StringComparison.Ordinal) &&
+                string.Equals(candidate.RoutePartitionName, clearPartition, StringComparison.Ordinal));
+            if (did?.Assignment is not { } assignment)
+            {
+                throw new InvalidOperationException(
+                    $"User DID '{clearPattern}' has no local assignment to clear.");
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Clear local assignment for {clearPattern}",
+                ["ACTION", "PHONE", "USER", "SLOT"],
+                [
+                    new ModuleTableRow(
+                        "clear",
+                        [
+                            "Clear (frees this DN for reassignment)",
+                            assignment.PhoneName,
+                            assignment.UserId ?? "<none>",
+                            assignment.LineIndex.ToString(),
+                        ],
+                        ["dids", "clear-apply", clearPattern, clearPartitionRaw]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+        }
+        if (context.Arguments is ["clear-apply", var clearApplyPattern, var clearApplyPartitionRaw])
+        {
+            var previous = await store.ClearAssignmentByPatternAsync(
+                clearApplyPattern, Normalize(clearApplyPartitionRaw), context.CancellationToken);
+            return previous is null
+                ? ModuleCommandResult.Ok($"User DID '{clearApplyPattern}' had no local assignment to clear.")
+                : ModuleCommandResult.Ok(
+                    $"Cleared the stale local assignment on '{clearApplyPattern}' (was phone " +
+                    $"'{previous.PhoneName}' line {previous.LineIndex}" +
+                    (previous.UserId is null ? string.Empty : $", user '{previous.UserId}'") +
+                    "). It is now available for reassignment.");
+        }
+        if (context.Arguments is ["reserve-one-review", var reserveOnePattern, var reserveOnePartition])
+        {            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Reserve {reserveOnePattern} ({DisplayPartition(reserveOnePartition)})",
+                ["ACTION", "DETAIL"],
+                [
+                    new ModuleTableRow(
+                        "reserve",
+                        [
+                            "Acknowledge as a known non-DID number",
+                            "Stops it from being reported as an anomaly in 'dids list'",
+                        ],
+                        ["dids", "reserve-one-apply", reserveOnePattern, reserveOnePartition]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+        }
+        if (context.Arguments is ["reserve-one-apply", var reserveOneApplyPattern, var reserveOneApplyPartition])
+        {
+            var added = await reservedStore.AddAsync(
+                [(reserveOneApplyPattern, reserveOneApplyPartition)],
+                "Acknowledged individually via 'dids list'.",
+                context.CancellationToken);
+            return ModuleCommandResult.Ok(added == 1
+                ? $"Reserved '{reserveOneApplyPattern}' ({reserveOneApplyPartition}); it will no " +
+                    "longer be reported as an anomaly."
+                : $"'{reserveOneApplyPattern}' ({reserveOneApplyPartition}) was already reserved.");
+        }
+        if (context.Arguments is ["reserve"])
+        {
+            if (scanPartitions.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Configure 'user-did-scan-partitions' before reserving numbers found in CUCM.");
+            }
+            using var cucm = await CreateCucmAsync(context);
+            var dids = await store.LoadAsync(context.CancellationToken);
+            var reservedExtensions = await reservedStore.LoadAsync(context.CancellationToken);
+            var reconciliation = await UserDidReconciler.ResolveFromCucmAsync(
+                cucm, dids, scanPartitions, context.CancellationToken, reservedExtensions);
+            if (reconciliation.Untracked.Count == 0)
+            {
+                return ModuleCommandResult.Ok(
+                    "No untracked numbers are currently configured in the scanned partition(s); " +
+                    "nothing to reserve.");
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Reserve {reconciliation.Untracked.Count} number(s) currently in CUCM but not " +
+                    "tracked as DIDs",
+                ["PATTERN", "PARTITION", "USAGE"],
+                reconciliation.Untracked
+                    .Select(anomaly => new ModuleTableRow(
+                        $"{anomaly.Pattern}:{anomaly.RoutePartitionName}",
+                        [anomaly.Pattern, anomaly.RoutePartitionName, Clean(anomaly.Usage)]))
+                    .Append(new ModuleTableRow(
+                        "reserve-all",
+                        [
+                            "Reserve all listed above",
+                            $"{reconciliation.Untracked.Count} number(s)",
+                            "Acknowledge and stop reporting them",
+                        ],
+                        ["dids", "reserve-apply"]))
+                    .ToArray(),
+                SubmitMode: ModuleTableSubmitMode.Save));
+        }
+        if (context.Arguments is ["reserve-apply"])
+        {
+            if (scanPartitions.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Configure 'user-did-scan-partitions' before reserving numbers found in CUCM.");
+            }
+            using var cucm = await CreateCucmAsync(context);
+            var dids = await store.LoadAsync(context.CancellationToken);
+            var reservedExtensions = await reservedStore.LoadAsync(context.CancellationToken);
+            var reconciliation = await UserDidReconciler.ResolveFromCucmAsync(
+                cucm, dids, scanPartitions, context.CancellationToken, reservedExtensions);
+            var added = await reservedStore.AddAsync(
+                reconciliation.Untracked.Select(anomaly => (anomaly.Pattern, anomaly.RoutePartitionName)),
+                $"Bulk-reserved from a live CUCM scan on {DateTimeOffset.UtcNow:u}.",
+                context.CancellationToken);
+            return ModuleCommandResult.Ok(
+                $"Reserved {added} number(s) found in CUCM's scanned partition(s) that aren't " +
+                "tracked DIDs; they will no longer be reported as anomalies.");
         }
         if (context.Arguments is ["add"])
         {
@@ -3612,7 +3958,8 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
         }
 
         return ModuleCommandResult.Fail(
-            "Usage: vt cucm dids [list|available|add [<dn,dn|start..end>]|replace]",
+            "Usage: vt cucm dids [list|available|add [<dn,dn|start..end>]|replace|reserve|reserved|" +
+                "detail <pattern> <partition>|clear-prompt]",
             exitCode: 2);
     }
     catch (Exception exception) when (IsExpected(exception))
@@ -3620,14 +3967,6 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
         return ModuleCommandResult.Fail(exception.Message);
     }
 }
-
-static string DisplayLiveStatus(UserDidLiveStatus status) => status switch
-{
-    UserDidLiveStatus.Available => "AVAILABLE",
-    UserDidLiveStatus.Reserved => "RESERVED",
-    UserDidLiveStatus.Anomaly => "ANOMALY",
-    _ => status.ToString().ToUpperInvariant(),
-};
 
 static async Task<UserDid> RequireAvailableUserDidAsync(
     ModuleContext context,
@@ -3642,14 +3981,15 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
             string.Equals(candidate.RoutePartitionName, partition, StringComparison.Ordinal));
     if (did is null)
     {
-        throw new InvalidOperationException(
-            $"User DN '{pattern}' is not present in the local inventory.");
+        throw new InvalidOperationException($"User DN '{pattern}' is not present in the local inventory.");
     }
     if (did.Assignment is not null)
     {
         throw new InvalidOperationException($"User DN '{pattern}' is no longer available.");
     }
 
+    // Guard against handing out a DID that CUCM shows is already in use or reserved by function,
+    // even though nothing in this tool's own bookkeeping recorded that assignment.
     var scanPartitions = UserDidReconciler.ParsePartitions(
         context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
     if (scanPartitions.Count > 0)
@@ -3673,8 +4013,7 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
                 !existing.Usage.Equals("Device", StringComparison.OrdinalIgnoreCase)
                 ? $"it is reserved by function in CUCM (usage: {existing.Usage})"
                 : "it is already configured in CUCM and in use";
-            throw new InvalidOperationException(
-                $"User DN '{pattern}' is no longer available: {reason}.");
+            throw new InvalidOperationException($"User DN '{pattern}' is no longer available: {reason}.");
         }
     }
 
@@ -3859,6 +4198,13 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
     var userTemplateName = RequireConfigurationValue(context, "classroom-user-line-template");
     var roomTemplate = await RequireLineTemplateAsync(context, roomTemplateName);
     var userTemplate = await RequireLineTemplateAsync(context, userTemplateName);
+    var userForwardCss = Normalize(context.Configuration.GetValueOrDefault("user-did-forward-css"));
+    var userCssActivationPolicy =
+        Normalize(context.Configuration.GetValueOrDefault("user-did-css-activation-policy"));
+    var userNoAnswerRingDuration =
+        int.TryParse(context.Configuration.GetValueOrDefault("user-did-no-answer-ring-duration"), out var ringDuration)
+            ? ringDuration
+            : (int?)null;
 
     return ClassroomPhonePlanner.Create(new ClassroomPhonePlanInput(
         phone,
@@ -3874,7 +4220,10 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         roomNumber,
         roomTemplate,
         userTemplate,
-        scope));
+        scope,
+        userForwardCss,
+        userCssActivationPolicy,
+        userNoAnswerRingDuration));
 }
 
 static string RequireConfigurationValue(ModuleContext context, string key) =>

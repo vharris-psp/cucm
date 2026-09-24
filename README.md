@@ -28,9 +28,9 @@ Configure the defaults applied to newly imported DIDs with `vt module configure 
 - `user-did-css`
 - `user-did-voicemail-profile`
 - `user-did-description-prefix`
-- `user-did-scan-partitions` — comma-separated CUCM route partitions checked for live DN usage
+- `user-did-scan-partitions` (enables live CUCM reconciliation — see below)
 
-Open `vt cucm dids` to browse, add, replace, or list only available inventory. The add and replace prompts accept comma-separated four-digit values or an equal-width numeric range:
+Open `vt cucm dids` to browse, add, or replace inventory. The add and replace prompts accept comma-separated four-digit values or an equal-width numeric range:
 
 ```text
 2100,2101
@@ -39,7 +39,24 @@ Open `vt cucm dids` to browse, add, replace, or list only available inventory. T
 
 Use **Replace** to discard an unassigned inventory and seed a corrected list. Replacement is blocked when any local assignment exists and requires `Ctrl+Enter` or `Cmd+Enter` confirmation.
 
-When `user-did-scan-partitions` is configured, inventory lists and assignment choices are reconciled against live CUCM directory numbers. Numbers already configured in CUCM, including function-reserved numbers, are not offered for assignment. Without the setting, availability falls back to the module's local assignment records.
+### Reconciling against live CUCM usage
+
+The tracked inventory is always authoritative for *which numbers are valid DIDs* — CUCM is never trusted to expand that list on its own. It is, however, the source of truth for *whether a tracked number is currently in use*, since assignments can happen outside this tool (manual AXL/Admin changes) and some numbers are legitimately reserved by function rather than assigned to a person (call park, voicemail ports, translation patterns, hunt pilots, etc.).
+
+Set `user-did-scan-partitions` (comma-separated CUCM route partition names, e.g. `AllPhones`) with `vt module configure cucm` to enable reconciliation. With it configured:
+
+- `vt cucm dids list` merges the tracked inventory with every directory number actually configured in the scanned partition(s) and shows a STATUS/REASON for each:
+  - `AVAILABLE` — not configured in CUCM; free to assign to a user or facility.
+  - `RESERVED` — configured in CUCM, either assigned to a device or reserved by function (the reason names the CUCM `usage` value, e.g. `Call Park`, when it isn't a plain device line).
+  - `ANOMALY` — needs attention: either a number configured in the scanned partition(s) that isn't in the tracked inventory at all (selecting its row offers **Reserve** — see below), or a tracked number this tool's local bookkeeping recorded as assigned but that CUCM no longer shows in the scanned partition(s) (stale; freed or reassigned outside this tool). Anomalies are never auto-corrected — review and fix the tracked inventory or CUCM configuration directly.
+- `vt cucm dids available` lists only the tracked numbers currently `AVAILABLE`.
+- Every DID assignment path (`users assign`, `phones` → **Assign available user DN**, `provision`) re-checks the selected DID against CUCM before saving and rejects it if CUCM now shows it in use or reserved by function, even if this tool's own bookkeeping still thought it was free.
+
+Without `user-did-scan-partitions` configured, `dids list`/`available` and assignment fall back to the local inventory's recorded assignments only, exactly as before.
+
+Numbers that show up as `ANOMALY` because they're plain internal extensions (not real DIDs) sharing the scanned partition — not misconfigurations — can be acknowledged with `vt cucm dids reserve` (or by selecting an individual anomaly row from `dids list`), which records them in a local `reserved-extensions.json` store so they stop being reported. This never makes a number assignable; it only silences numbers you've confirmed are something other than a DID. `vt cucm dids reserved` lists everything currently acknowledged this way.
+
+A tracked DID can also show `ANOMALY` the other way: this tool's own bookkeeping thinks it's still assigned to a phone/user, but CUCM no longer shows it in the scanned partition(s) (the phone was reassigned, rebuilt, or the DN removed outside this tool). Selecting that row from `dids list` (or any DID's row, via `vt cucm dids detail <pattern> <partition>`) opens its detail screen; if it has a local assignment, a **Clear local assignment** action is offered there — review shows exactly which phone/line/user recorded it, and saving frees the DID for reassignment without touching CUCM itself (it only corrects the stale local record). `vt cucm dids clear-prompt` reaches the same review by typing the pattern and partition directly instead of navigating from `list`.
 
 `vt cucm users list` maps each CUCM/LDAP `telephoneNumber` to an internal DN when the value contains exactly four digits. Select a user, choose **Assign phone and DN**, select a phone and a line slot, review the complete change, then press `Ctrl+Enter` or `Cmd+Enter` to save. The review screen's **OWNER ACTION** column shows whether the phone is getting a new owner, keeping its current one, or being reassigned away from another user. Saving adds the phone to the user's associated devices, sets the phone owner (replacing the previous owner if there was one — the previous owner's device association is removed automatically, best-effort), assigns the DN to the selected slot, ensures line 3 carries a room DN (leaving one alone if it already exists, otherwise assigning the `89898989` placeholder until a real per-phone/location room-DID source exists), and records the assignment locally.
 
@@ -106,6 +123,7 @@ The module can auto-compose each phone's CUCM **Description** as a compliance su
 
 - `"kind": "user"` slots must have any DN assigned.
 - `"kind": "room"` slots must have a 3-digit room number, in the route partition its building expects (from `building-patterns`); the room slot also supplies the description's `RoomNumber` (building code + room number, e.g. `HS130`).
+- `"kind": "speeddial"` is optional (at most one per template) and only consumed by the classroom workflow's All Call button (see above) — it plays no part in compliance/description evaluation.
 
 Whenever a phone is saved — provisioned, edited, assigned/reassigned to a user, or has a line's DN added/changed/removed — the Description is recomposed:
 
@@ -131,17 +149,29 @@ The stored shape is:
       "routePartitionName": "HS-Rooms",
       "devicePoolName": "HighSchool",
       "devicePools": ["HighSchool", "HighSchool_SRST", "2024-HS-Pool"],
-      "phoneTemplateName": "Standard 7841 SIP 1DN-1SdBLF-2DN"
+      "phoneTemplateName": "Standard 7841 SIP 1DN-1SdBLF-2DN",
+      "roomExternalPhoneNumberMask": "2313482160",
+      "allCallNumber": "2313480199"
     }
   }
 }
 ```
 
-The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. The selected `phoneTemplateName` is applied by the classroom workflow.
+The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. The selected `phoneTemplateName` is applied by the classroom workflow. `roomExternalPhoneNumberMask` and `allCallNumber` are both optional and specific to this building (see the classroom workflow section above); the add/edit wizard prompts for each but accepts a blank value to leave it unconfigured.
 
 From an existing phone, choose **Apply template** and then **Classroom**. Select a user and location, then enter the room's 3-digit number. The module resolves the effective phone button template and requires its `template-compliance-policies` entry to define exactly one user slot and one room slot. It also requires unambiguous `building-patterns` and complete room/user line templates named by the required `classroom-room-line-template` and `classroom-user-line-template` settings. The room template supplies shared external-mask and voicemail defaults, while the selected location always derives the room partition and the room description, alerting name, caller ID, and line label as `<LOCATION> Room <ROOM>` (for example, `PHS Room 130`). The configured user template supplies the user-line values and must set `associateEndUser` to `true`.
 
 After the room number, a **scope** selection lets the two slots be applied independently: **Apply both** (the full classroom template — the original behavior), **Room number only** (assigns/updates just the room line; the user's DN, owner, and device association are left completely untouched), or **User/DN only** (assigns/updates just the user's DN, owner, and device association; the room line is left completely untouched). The review screen marks every field belonging to an excluded slot as `<Not applied>` / `Skip (excluded)` so it's clear nothing will be written for it, and a partial apply is not required to leave the phone fully compliant (unlike a full "both" apply, which still is) since it's an intentional incremental step. The device pool and button template are always brought in line regardless of scope, since either slot depends on the phone having the right button positions.
+
+The room line's external phone number mask and an optional **All Call** speed dial are per-building, not per-template: configure `roomExternalPhoneNumberMask` and `allCallNumber` on each building profile (`vt cucm configure` → **Buildings** → add/edit — both prompts accept a blank value to leave them unconfigured for now). If a building has no mask configured, the room line's external mask is simply left unmanaged (the review row shows `<Not configured for building>` with a note to configure it, rather than blocking or clearing the field). The user line's mask still comes from the `classroom-user-line-template` line template and is always required.
+
+An **All Call** speed dial (not a DN/line) can be added to the classroom template by declaring a `"speeddial"` slot in `template-compliance-policies` alongside the required `"user"`/`"room"` slots — at most one per template. When the template has a speed-dial slot and the building has `allCallNumber` configured, Save sets that button to the building's number with the label "All Call"; if the slot exists but the building has no number configured, the review row shows `<Not configured for building>` (configure it via **Buildings**, or Save without it — nothing is written for that button).
+
+Press **F1 (Remove unspecified lines)** from the review screen to find and clear any line the phone has beyond the classroom template's user/room slots (for example, a stray line left over from a previous configuration) — it reviews every such line before removing it, unassigning the DN from the phone (the DN itself is not deleted from CUCM) and clearing any matching local user-DN inventory record.
+
+Every user DN the classroom workflow assigns is also associated with that user directly on the directory number itself ("Users Associated with Line"), in addition to the phone's owner field — this happens automatically whenever the DN is created or updated and needs no configuration.
+
+Optionally configure `user-did-forward-css` to have the classroom workflow manage a user DN's call-forward and call-pickup settings whenever it creates or updates that line: every forward variant (All, Busy, Busy Internal, No Answer, No Answer Internal, No Coverage, No Coverage Internal, On Failure, Not Registered, Not Registered Internal) is set to forward via that calling search space rather than to voicemail, the DN's calling search space activation policy is set from `user-did-css-activation-policy` (default `Use System Default`), its call pickup group is always cleared to none, and — if `user-did-no-answer-ring-duration` is configured — both "No Answer" variants get that ring duration in seconds. Leaving `user-did-forward-css` unset leaves all of this entirely unmanaged. `vt cucm phones check <phone> classroom` verifies these same expectations (plus that the DN's voicemail profile actually exists in CUCM) against the live DN and reports any mismatch.
 
 The selected user's CUCM primary extension is authoritative when it is a four-digit DN; a four-digit LDAP telephone number is used only when no primary extension is assigned. The classroom workflow does not allocate from the local user-DN inventory when neither assigned value is available; that case must be handled through a dedicated allocation workflow.
 
@@ -153,7 +183,7 @@ From a phone's line menu (`vt cucm phones` → select a phone → **Numbers** �
 
 The same line menu offers **Remove directory number**, which reviews the line's current pattern/partition, then on save removes the line's DN assignment from the phone in CUCM and clears any matching local user-DN inventory assignment so that DN becomes available again.
 
-Run `vt cucm phones check <phone> classroom` to audit the applied classroom template from live CUCM data. It resolves the user and room slots from the phone button template's compliance policy, compares the user slot with the phone owner's primary extension (falling back to the owner's four-digit LDAP telephone number), resolves the building from the phone's device pool, and validates the room number and partition. The narrower `room-routing` profile performs only the building, room-number, and partition checks.
+Run `vt cucm phones check <phone> classroom` to audit the applied classroom template from live CUCM data. It resolves the user and room slots from the phone button template's compliance policy, compares the user slot with the phone owner's primary extension (falling back to the owner's four-digit LDAP telephone number), resolves the building from the phone's device pool, and validates the room number and partition. When `user-did-forward-css` is configured it also verifies the user DN's call-forward settings, CSS activation policy, and call pickup group (see above), and it always verifies the user DN's voicemail profile exists in CUCM. The narrower `room-routing` profile performs only the building, room-number, and partition checks.
 
 ## Provisioning a phone from scratch
 

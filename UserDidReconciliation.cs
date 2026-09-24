@@ -50,10 +50,14 @@ internal static class UserDidReconciler
     /// </summary>
     internal static UserDidReconciliationResult Resolve(
         IReadOnlyList<UserDid> tracked,
-        IReadOnlyList<CucmDirectoryNumber> configuredLines)
+        IReadOnlyList<CucmDirectoryNumber> configuredLines,
+        IReadOnlyCollection<ReservedExtension>? reservedExtensions = null)
     {
         ArgumentNullException.ThrowIfNull(tracked);
         ArgumentNullException.ThrowIfNull(configuredLines);
+        var reserved = new HashSet<(string Pattern, string RoutePartitionName)>(
+            (reservedExtensions ?? [])
+                .Select(extension => (extension.Pattern, extension.RoutePartitionName)));
 
         var byPattern = new Dictionary<string, List<CucmDirectoryNumber>>(StringComparer.Ordinal);
         foreach (var line in configuredLines)
@@ -103,6 +107,7 @@ internal static class UserDidReconciler
         var untracked = byPattern.Values
             .SelectMany(lines => lines)
             .Where(line => !matched.Contains(line))
+            .Where(line => !reserved.Contains((line.Pattern!, line.RoutePartitionName!)))
             .Select(line => new UserDidPartitionAnomaly(
                 line.Pattern!,
                 line.RoutePartitionName!,
@@ -120,7 +125,8 @@ internal static class UserDidReconciler
         CucmService cucm,
         IReadOnlyList<UserDid> tracked,
         IReadOnlyList<string> scanPartitions,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IReadOnlyCollection<ReservedExtension>? reservedExtensions = null)
     {
         ArgumentNullException.ThrowIfNull(cucm);
         ArgumentNullException.ThrowIfNull(tracked);
@@ -136,7 +142,7 @@ internal static class UserDidReconciler
                 lines.Add(line);
             }
         }
-        return Resolve(tracked, lines);
+        return Resolve(tracked, lines, reservedExtensions);
     }
 
     internal static IReadOnlyList<string> ParsePartitions(string? value) =>

@@ -305,6 +305,41 @@ internal sealed class UserDidStore(string dataDirectory)
         return changed;
     }
 
+    /// <summary>
+    /// Directly clears a specific tracked DID's local assignment record by pattern + partition,
+    /// independent of the live phone/line it was last recorded against. Used to fix a stale
+    /// assignment (e.g. the phone was reassigned or deleted outside this tool) that the
+    /// phone/line-driven <see cref="ClearAssignmentAsync(string, int, CancellationToken)"/> can no
+    /// longer reach because the recorded phone/line no longer reflects that DID.
+    /// </summary>
+    internal async Task<UserDidAssignment?> ClearAssignmentByPatternAsync(
+        string pattern,
+        string? routePartitionName,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pattern);
+        await using var inventoryLock = await AcquireLockAsync(ct);
+        var dids = (await LoadCoreAsync(ct)).ToList();
+        var partition = Normalize(routePartitionName);
+        var target = dids.FindIndex(did =>
+            did.Pattern.Equals(pattern, StringComparison.Ordinal) &&
+            string.Equals(did.RoutePartitionName, partition, StringComparison.Ordinal));
+        if (target < 0)
+        {
+            throw new InvalidOperationException(
+                $"User DID '{pattern}' is not present in the local inventory" +
+                (partition is null ? "." : $" with partition '{partition}'."));
+        }
+        var previousAssignment = dids[target].Assignment;
+        if (previousAssignment is null)
+        {
+            return null;
+        }
+        dids[target] = dids[target] with { Assignment = null };
+        await SaveCoreAsync(dids, ct);
+        return previousAssignment;
+    }
+
     internal static IReadOnlyList<string> ParsePatterns(string value)
     {
         if (string.IsNullOrWhiteSpace(value))

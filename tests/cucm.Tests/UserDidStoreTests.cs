@@ -86,6 +86,41 @@ public sealed class UserDidStoreTests : IDisposable
             store.MarkAssignedAsync("1234", "Users-PT", "SEP002", 1, "alice", "Users-PT"));
     }
 
+    [Fact]
+    public async Task ClearAssignmentByPatternFreesAStaleAssignmentRegardlessOfCurrentPhoneState()
+    {
+        var store = new UserDidStore(_directory);
+        await store.AddAsync(["1234"], "Users-PT", null, null, null);
+        await store.MarkAssignedAsync("1234", "Users-PT", "SEP001", 1, "alice", "Users-PT");
+
+        var cleared = await store.ClearAssignmentByPatternAsync("1234", "Users-PT");
+
+        Assert.NotNull(cleared);
+        Assert.Equal("SEP001", cleared!.PhoneName, ignoreCase: true);
+        var did = Assert.Single(await store.LoadAsync());
+        Assert.Null(did.Assignment);
+    }
+
+    [Fact]
+    public async Task ClearAssignmentByPatternReturnsNullWhenAlreadyUnassigned()
+    {
+        var store = new UserDidStore(_directory);
+        await store.AddAsync(["1234"], "Users-PT", null, null, null);
+
+        var cleared = await store.ClearAssignmentByPatternAsync("1234", "Users-PT");
+
+        Assert.Null(cleared);
+    }
+
+    [Fact]
+    public async Task ClearAssignmentByPatternThrowsWhenPatternIsNotTracked()
+    {
+        var store = new UserDidStore(_directory);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.ClearAssignmentByPatternAsync("9999", "Users-PT"));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_directory))

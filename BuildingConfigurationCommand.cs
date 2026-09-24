@@ -82,6 +82,10 @@ internal static class BuildingConfigurationCommand
                 new("recognized-pools", ["Recognized device pools", string.Join(", ", profile.DevicePoolNames)]),
                 new("template", ["Phone button template", profile.PhoneTemplateName ?? "<phone default>"]),
                 new(
+                    "room-mask",
+                    ["Room external phone number mask", profile.RoomExternalPhoneNumberMask ?? "<not configured>"]),
+                new("all-call", ["All Call number", profile.AllCallNumber ?? "<not configured>"]),
+                new(
                     "edit",
                     ["Edit", "Select live CUCM resources and review the complete profile"],
                     ["configure", "buildings", "edit-partition", selectedCode]),
@@ -192,7 +196,7 @@ internal static class BuildingConfigurationCommand
                     template.Uuid ?? $"phone-template:{template.Name}",
                     [template.Name, Clean(template.Description)],
                     [
-                        "configure", "buildings", "edit-review", templateCode,
+                        "configure", "buildings", "edit-mask", templateCode,
                         templatePartition, templateTargetPool, recognizedPoolsRaw, template.Name,
                     ]));
             }
@@ -204,8 +208,50 @@ internal static class BuildingConfigurationCommand
 
         if (context.Arguments is
             [
+                "buildings", "edit-mask", var maskCode, var maskPartition,
+                var maskTargetPool, var maskPoolsRaw, var maskTemplate,
+            ])
+        {
+            var profiles = await store.LoadEffectiveAsync(legacyConfiguration, context.CancellationToken);
+            var currentMask = profiles.TryGetValue(NormalizeCode(maskCode), out var maskProfile)
+                ? maskProfile.RoomExternalPhoneNumberMask
+                : null;
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+                $"Room external phone number mask for {maskCode}",
+                "External phone number mask for this building's room DNs (leave blank to configure later)",
+                [
+                    "configure", "buildings", "edit-allcall", maskCode,
+                    maskPartition, maskTargetPool, maskPoolsRaw, maskTemplate,
+                ],
+                currentMask,
+                AllowEmpty: true));
+        }
+
+        if (context.Arguments is
+            [
+                "buildings", "edit-allcall", var allCallCode, var allCallPartition,
+                var allCallTargetPool, var allCallPoolsRaw, var allCallTemplate, var allCallMaskRaw,
+            ])
+        {
+            var profiles = await store.LoadEffectiveAsync(legacyConfiguration, context.CancellationToken);
+            var currentAllCall = profiles.TryGetValue(NormalizeCode(allCallCode), out var allCallProfile)
+                ? allCallProfile.AllCallNumber
+                : null;
+            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+                $"All Call number for {allCallCode}",
+                "Speed-dial destination for this building's All Call button (leave blank to configure later)",
+                [
+                    "configure", "buildings", "edit-review", allCallCode,
+                    allCallPartition, allCallTargetPool, allCallPoolsRaw, allCallTemplate, allCallMaskRaw,
+                ],
+                currentAllCall,
+                AllowEmpty: true));
+        }
+
+        if (context.Arguments is
+            [
                 "buildings", "edit-review", var reviewCode, var reviewPartition,
-                var reviewTargetPool, var reviewPoolsRaw, var reviewTemplate,
+                var reviewTargetPool, var reviewPoolsRaw, var reviewTemplate, var reviewMaskRaw, var reviewAllCallRaw,
             ])
         {
             var profiles = await store.LoadEffectiveAsync(
@@ -215,7 +261,9 @@ internal static class BuildingConfigurationCommand
                 reviewPartition,
                 reviewTargetPool,
                 reviewPoolsRaw,
-                reviewTemplate);
+                reviewTemplate,
+                reviewMaskRaw,
+                reviewAllCallRaw);
             EnsurePoolsAreUnambiguous(profiles, reviewCode, profile);
             return ModuleCommandResult.Render(CreateReviewResponse(reviewCode, profile));
         }
@@ -223,7 +271,7 @@ internal static class BuildingConfigurationCommand
         if (context.Arguments is
             [
                 "buildings", "edit-save", var saveCode, var savePartition,
-                var saveTargetPool, var savePoolsRaw, var saveTemplate,
+                var saveTargetPool, var savePoolsRaw, var saveTemplate, var saveMaskRaw, var saveAllCallRaw,
             ])
         {
             var profiles = (await store.LoadEffectiveAsync(
@@ -232,7 +280,8 @@ internal static class BuildingConfigurationCommand
                     pair => pair.Key,
                     pair => pair.Value,
                     StringComparer.OrdinalIgnoreCase);
-            var profile = CreateProfile(savePartition, saveTargetPool, savePoolsRaw, saveTemplate);
+            var profile = CreateProfile(
+                savePartition, saveTargetPool, savePoolsRaw, saveTemplate, saveMaskRaw, saveAllCallRaw);
             EnsurePoolsAreUnambiguous(profiles, saveCode, profile);
             profiles[NormalizeCode(saveCode)] = profile;
             await store.ReplaceAsync(profiles, context.CancellationToken);
@@ -326,7 +375,7 @@ internal static class BuildingConfigurationCommand
         var code = NormalizeCode(rawCode);
         return new ModuleTableResponse(
             $"Review building profile '{code}'",
-            ["CODE", "ROOM PARTITION", "TARGET POOL", "RECOGNIZED POOLS", "PHONE TEMPLATE"],
+            ["CODE", "ROOM PARTITION", "TARGET POOL", "RECOGNIZED POOLS", "PHONE TEMPLATE", "ROOM MASK", "ALL CALL"],
             [
                 new ModuleTableRow(
                     "save",
@@ -336,11 +385,15 @@ internal static class BuildingConfigurationCommand
                         profile.DevicePoolName!,
                         string.Join(", ", profile.DevicePoolNames),
                         profile.PhoneTemplateName!,
+                        profile.RoomExternalPhoneNumberMask ?? "<not configured>",
+                        profile.AllCallNumber ?? "<not configured>",
                     ],
                     [
                         "configure", "buildings", "edit-save", code,
                         profile.RoutePartitionName, profile.DevicePoolName!,
                         string.Join(",", profile.DevicePoolNames), profile.PhoneTemplateName!,
+                        profile.RoomExternalPhoneNumberMask ?? string.Empty,
+                        profile.AllCallNumber ?? string.Empty,
                     ]),
             ],
             SubmitMode: ModuleTableSubmitMode.Save);
@@ -383,7 +436,9 @@ internal static class BuildingConfigurationCommand
         string routePartitionName,
         string targetPool,
         string recognizedPoolsRaw,
-        string phoneTemplateName)
+        string phoneTemplateName,
+        string? roomExternalPhoneNumberMaskRaw = null,
+        string? allCallNumberRaw = null)
     {
         var pools = recognizedPoolsRaw
             .Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -395,7 +450,9 @@ internal static class BuildingConfigurationCommand
             routePartitionName.Trim(),
             pools,
             phoneTemplateName.Trim(),
-            targetPool.Trim());
+            targetPool.Trim(),
+            string.IsNullOrWhiteSpace(roomExternalPhoneNumberMaskRaw) ? null : roomExternalPhoneNumberMaskRaw.Trim(),
+            string.IsNullOrWhiteSpace(allCallNumberRaw) ? null : allCallNumberRaw.Trim());
     }
 
     private static void EnsurePoolsAreUnambiguous(

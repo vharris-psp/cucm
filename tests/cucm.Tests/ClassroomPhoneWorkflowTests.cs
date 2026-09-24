@@ -84,6 +84,7 @@ public sealed class ClassroomPhoneWorkflowTests
                 "user.external-mask",
                 "user.voicemail",
                 "user.owner",
+                "user.dn-association",
                 "user.association",
                 "previous-owner.association",
                 "phone.description",
@@ -154,6 +155,115 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.Equal("MS Room 130", middleSchool.RoomLine.Display);
         Assert.Equal("MS Room 130", middleSchool.RoomLine.AlertingName);
         Assert.Equal("MS Room 130", middleSchool.RoomLine.Description);
+    }
+
+    [Fact]
+    public void PlannerLeavesRoomExternalMaskUnmanagedWhenBuildingHasNoMaskConfigured()
+    {
+        var input = CreateInput();
+        var withoutMask = input with
+        {
+            BuildingPatterns = new Dictionary<string, BuildingPattern>(
+                input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS"] = input.BuildingPatterns["HS"] with { RoomExternalPhoneNumberMask = null },
+            },
+        };
+
+        var plan = ClassroomPhonePlanner.Create(withoutMask);
+
+        Assert.Null(plan.RoomLine.ExternalPhoneNumberMask);
+        Assert.False(plan.RoomLine.UpdateExternalMask);
+        var maskChange = Assert.Single(plan.Changes.Where(change => change.Key == "room.external-mask"));
+        Assert.Equal("<Not configured for building>", maskChange.Target);
+        Assert.Equal("Configure via 'configure buildings'", maskChange.Action);
+    }
+
+    [Fact]
+    public void PlannerPlansAllCallSpeedDialWhenPolicyAndBuildingBothConfigureIt()
+    {
+        var input = CreateInput();
+        var withSpeedDial = input with
+        {
+            BuildingPatterns = new Dictionary<string, BuildingPattern>(
+                input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+            },
+            CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
+                input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS-UserRoom"] = new TemplateCompliancePolicy(
+                    [
+                        .. input.CompliancePolicies["HS-UserRoom"].Slots,
+                        new TemplateComplianceSlot(6, TemplateComplianceSlotKind.SpeedDial),
+                    ]),
+            },
+        };
+
+        var plan = ClassroomPhonePlanner.Create(withSpeedDial);
+
+        Assert.NotNull(plan.AllCallSpeedDial);
+        Assert.Equal(6, plan.AllCallSpeedDial!.Index);
+        Assert.Equal("5551000", plan.AllCallSpeedDial.Destination);
+        Assert.True(plan.AllCallSpeedDial.Update);
+        var speedDialChange = Assert.Single(plan.Changes.Where(change => change.Key == "phone.all-call"));
+        Assert.Equal("5551000", speedDialChange.Target);
+        Assert.Equal("Update", speedDialChange.Action);
+    }
+
+    [Fact]
+    public void PlannerLeavesAllCallUnmanagedWhenBuildingHasNoNumberConfigured()
+    {
+        var input = CreateInput();
+        var withSpeedDialSlotOnly = input with
+        {
+            CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
+                input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS-UserRoom"] = new TemplateCompliancePolicy(
+                    [
+                        .. input.CompliancePolicies["HS-UserRoom"].Slots,
+                        new TemplateComplianceSlot(6, TemplateComplianceSlotKind.SpeedDial),
+                    ]),
+            },
+        };
+
+        var plan = ClassroomPhonePlanner.Create(withSpeedDialSlotOnly);
+
+        Assert.Null(plan.AllCallSpeedDial);
+        var speedDialChange = Assert.Single(plan.Changes.Where(change => change.Key == "phone.all-call"));
+        Assert.Equal("<Not configured for building>", speedDialChange.Target);
+        Assert.Equal("Configure via 'configure buildings'", speedDialChange.Action);
+    }
+
+    [Fact]
+    public async Task SaveSendsAllCallSpeedDialWriteWhenConfigured()
+    {
+        var input = CreateInput();
+        var withSpeedDial = input with
+        {
+            BuildingPatterns = new Dictionary<string, BuildingPattern>(
+                input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+            },
+            CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
+                input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS-UserRoom"] = new TemplateCompliancePolicy(
+                    [
+                        .. input.CompliancePolicies["HS-UserRoom"].Slots,
+                        new TemplateComplianceSlot(6, TemplateComplianceSlotKind.SpeedDial),
+                    ]),
+            },
+        };
+        var plan = ClassroomPhonePlanner.Create(withSpeedDial);
+        var writer = new RecordingWriter();
+
+        await ClassroomPhoneExecutor.ExecuteAsync(plan, writer);
+
+        Assert.Contains("all-call-speed-dial", writer.Calls);
     }
 
     [Fact]
@@ -444,7 +554,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "HS-Rooms",
                 ["HS-Legacy"],
                 "HS-UserRoom",
-                "HS-Classroom"),
+                "HS-Classroom",
+                RoomExternalPhoneNumberMask: "555{room}"),
         };
         var policies = new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase)
         {
@@ -546,6 +657,11 @@ public sealed class ClassroomPhoneWorkflowTests
             string phoneName,
             ClassroomLinePlan line,
             CancellationToken cancellationToken) => Record($"external-mask-{line.Kind}");
+
+        public Task UpdateAllCallSpeedDialAsync(
+            string phoneName,
+            ClassroomSpeedDialPlan speedDial,
+            CancellationToken cancellationToken) => Record("all-call-speed-dial");
 
         public Task UpdateUserAssociationAsync(
             ClassroomPhonePlan plan,
