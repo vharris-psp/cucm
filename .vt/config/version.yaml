@@ -1,4 +1,7 @@
-version: "0.10.4"
-vt_version: "1.4.11"
+version: "0.11.0"
+vt_version: "1.5.0"
 project_file: "cucm.csproj"
-dependencies: []
+dependencies:
+  - "VSharp"
+  - "VTModuleSDK"
+  - "VTProjectSDK"

@@ -8,3 +8,7 @@
 	url = https://github.com/vharris-psp/VTModuleSDK.git
 	branch = vt/cucm
 	update = checkout
+[submodule ".vt/sdk"]
+	path = .vt/sdk
+	url = git@github.com:vharris-psp/VTProjectSDK.git
+	branch = main

@@ -1,0 +1,14 @@
+{
+  "$schema": "../sdk/schemas/vt-project-sdk-v1.schema.json",
+  "contract": "vt-project-sdk/v1",
+  "sourceVersion": "1.5.0",
+  "packages": {
+    "dotnet": "1.5.0",
+    "python": "1.5.0",
+    "javascript": "1.5.0"
+  },
+  "projectContracts": [
+    "vt-project/v1",
+    "vt-version/v1"
+  ]
+}
