@@ -23,6 +23,50 @@ public sealed class PhoneConfigurationChecksTests
     }
 
     [Fact]
+    public void ParseBuildingPatternsAcceptsCommaSeparatedDevicePoolsString()
+    {
+        // A JSON array of devicePools crashes 'vt module configure's markup renderer on this
+        // setting's raw value (literal '[' ']' are parsed as style tags) - a bracket-free
+        // comma-separated string must also be accepted.
+        var patterns = PhoneConfigurationChecks.ParseBuildingPatterns(
+            """
+            {
+              "HS": {
+                "routePartitionName": "Rooms-PT",
+                "devicePoolName": "High School Classrooms",
+                "devicePools": "High School, High School Classrooms",
+                "phoneTemplateName": "HS-UserRoom"
+              }
+            }
+            """);
+
+        var building = Assert.Single(patterns).Value;
+        Assert.Equal(["High School", "High School Classrooms"], building.DevicePoolNames);
+    }
+
+    [Fact]
+    public void ParseTemplateCompliancePoliciesAcceptsCommaSeparatedSlotsString()
+    {
+        // A JSON 'slots' array crashes 'vt module configure's markup renderer on this setting's
+        // raw value (literal '[' ']' are parsed as style tags) - a bracket-free "index:kind,..."
+        // string must also be accepted.
+        var policies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
+            """
+            {
+              "Standard 7841 SIP 1DN-1SdBLF-2DN": { "slots": "1:user,3:room" }
+            }
+            """);
+
+        var policy = Assert.Single(policies).Value;
+        Assert.Equal(
+            [
+                new TemplateComplianceSlot(1, TemplateComplianceSlotKind.User),
+                new TemplateComplianceSlot(3, TemplateComplianceSlotKind.Room),
+            ],
+            policy.Slots);
+    }
+
+    [Fact]
     public void EvaluateClassroomUsesOwnerDnAndBuildingRoutingInsteadOfPlaceholderValues()
     {
         var phone = new VSharp.Cucm.Models.CucmPhone(

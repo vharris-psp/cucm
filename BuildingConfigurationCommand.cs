@@ -8,6 +8,7 @@ internal static class BuildingConfigurationCommand
         CucmService cucm)
     {
         var store = new BuildingProfileStore(context.DataDirectory);
+        var resourceQueries = new CucmResourceQueryService(cucm);
         var legacyConfiguration = context.Configuration.GetValueOrDefault("building-patterns");
 
         if (context.Arguments.Count == 0)
@@ -20,6 +21,10 @@ internal static class BuildingConfigurationCommand
                         "buildings",
                         ["Buildings", "Manage classroom routing, device pools, and phone templates"],
                         ["configure", "buildings"]),
+                    new ModuleTableRow(
+                        "defaults",
+                        ["Defaults", "Manage user DID partition/CSS/voicemail/forward defaults with live selectors"],
+                        ["configure", "defaults"]),
                 ]));
         }
 
@@ -123,7 +128,7 @@ internal static class BuildingConfigurationCommand
                     $"Building '{code}' already exists. Select it and choose Edit.");
             }
             return ModuleCommandResult.Render(await CreatePartitionSelectorAsync(
-                cucm,
+                resourceQueries,
                 code,
                 context.CancellationToken));
         }
@@ -131,7 +136,7 @@ internal static class BuildingConfigurationCommand
         if (context.Arguments is ["buildings", "edit-partition", var editCode])
         {
             return ModuleCommandResult.Render(await CreatePartitionSelectorAsync(
-                cucm,
+                resourceQueries,
                 NormalizeCode(editCode),
                 context.CancellationToken));
         }
@@ -139,13 +144,8 @@ internal static class BuildingConfigurationCommand
         if (context.Arguments is ["buildings", "edit-device-pool", var poolCode, var partitionName])
         {
             var rows = new List<ModuleTableRow>();
-            await foreach (var pool in cucm.ListDevicePoolsAsync(
-                cancellationToken: context.CancellationToken))
+            foreach (var pool in await resourceQueries.ListDevicePoolsAsync(context.CancellationToken))
             {
-                if (string.IsNullOrWhiteSpace(pool.Name))
-                {
-                    continue;
-                }
                 rows.Add(new ModuleTableRow(
                     pool.Uuid ?? $"device-pool:{pool.Name}",
                     [pool.Name, Clean(pool.Description)],
@@ -185,13 +185,8 @@ internal static class BuildingConfigurationCommand
             ])
         {
             var rows = new List<ModuleTableRow>();
-            await foreach (var template in cucm.ListPhoneButtonTemplatesAsync(
-                cancellationToken: context.CancellationToken))
+            foreach (var template in await resourceQueries.ListPhoneButtonTemplatesAsync(context.CancellationToken))
             {
-                if (string.IsNullOrWhiteSpace(template.Name))
-                {
-                    continue;
-                }
                 rows.Add(new ModuleTableRow(
                     template.Uuid ?? $"phone-template:{template.Name}",
                     [template.Name, Clean(template.Description)],
@@ -347,18 +342,13 @@ internal static class BuildingConfigurationCommand
     }
 
     private static async Task<ModuleTableResponse> CreatePartitionSelectorAsync(
-        CucmService cucm,
+        CucmResourceQueryService resourceQueries,
         string code,
         CancellationToken cancellationToken)
     {
         var rows = new List<ModuleTableRow>();
-        await foreach (var partition in cucm.ListRoutePartitionsAsync(
-            cancellationToken: cancellationToken))
+        foreach (var partition in await resourceQueries.ListRoutePartitionsAsync(cancellationToken))
         {
-            if (string.IsNullOrWhiteSpace(partition.Name))
-            {
-                continue;
-            }
             rows.Add(new ModuleTableRow(
                 partition.Uuid ?? $"partition:{partition.Name}",
                 [partition.Name, Clean(partition.Description)],

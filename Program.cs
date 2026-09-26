@@ -43,11 +43,15 @@ return await ModuleApplication
         defaultValue: "{}")
     .Setting(
         "classroom-room-line-template",
-        "Name of the room-kind line template supplying shared external-mask and voicemail defaults; " +
-            "the classroom workflow derives room identity from the selected location")
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a picker built from " +
+            "your actual line templates and takes precedence once saved there. Name of the " +
+            "room-kind line template supplying shared external-mask and voicemail defaults; the " +
+            "classroom workflow derives room identity from the selected location.")
     .Setting(
         "classroom-user-line-template",
-        "Name of the user-kind line template used by the classroom workflow")
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a picker built from " +
+            "your actual line templates and takes precedence once saved there. Name of the " +
+            "user-kind line template used by the classroom workflow.")
     .Setting(
         "phone-check-placeholder",
         "Legacy JSON assignment used only by the basic-room checker",
@@ -55,48 +59,70 @@ return await ModuleApplication
         defaultValue: "{\"userDn\":\"1000\",\"roomNumber\":\"3000\",\"location\":\"default\"}")
     .Setting(
         "user-did-partition",
-        "Route partition used when importing and creating user DIDs",
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a live selector and " +
+            "takes precedence once saved there. Route partition used when importing and creating " +
+            "user DIDs.",
         required: false)
     .Setting(
         "user-did-css",
-        "Calling search space used when creating user DIDs",
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a live selector and " +
+            "takes precedence once saved there. Calling search space used when creating user DIDs.",
         required: false)
     .Setting(
         "user-did-voicemail-profile",
-        "Voicemail profile used when creating user DIDs",
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a live selector and " +
+            "takes precedence once saved there. Voicemail profile used when creating user DIDs.",
         required: false)
     .Setting(
         "user-did-description-prefix",
-        "Description prefix used when creating user DIDs",
+        "Deprecated: use 'vt cucm configure defaults' instead, which takes precedence once saved " +
+            "there. Description prefix used when creating user DIDs.",
         required: false,
         defaultValue: "User DID")
     .Setting(
         "user-did-scan-partitions",
-        "Comma-separated CUCM route partition names (e.g. 'AllPhones') to scan when reconciling " +
-            "the tracked local DID inventory against numbers actually configured in CUCM. Powers " +
-            "'dids list' and 'dids available' and guards live assignment so a DID already in use " +
-            "or reserved by function is never handed out. The tracked inventory always remains " +
-            "authoritative for which numbers are valid DIDs; CUCM is only trusted for usage status. " +
-            "Without this setting, DID commands fall back to the local inventory's recorded " +
-            "assignments only.",
+        "Deprecated: use 'vt cucm configure defaults' instead, which takes precedence once saved " +
+            "there. Comma-separated CUCM route partition names (e.g. 'AllPhones') to scan when " +
+            "reconciling the tracked local DID inventory against numbers actually configured in " +
+            "CUCM. Powers 'dids list' and 'dids available' and guards live assignment so a DID " +
+            "already in use or reserved by function is never handed out. The tracked inventory " +
+            "always remains authoritative for which numbers are valid DIDs; CUCM is only trusted " +
+            "for usage status. Without this setting, DID commands fall back to the local " +
+            "inventory's recorded assignments only.",
         required: false)
     .Setting(
         "user-did-forward-css",
-        "Calling search space applied to every call-forward variant (All, Busy, No Answer, No " +
-            "Coverage, On Failure, Not Registered - internal and external) on a classroom user's " +
-            "DN. Forward-to-voicemail is always left off in favor of this CSS. Omit to leave a " +
-            "classroom user line's forward settings unmanaged.",
+        "Deprecated: use 'vt cucm configure defaults' instead, which offers a live selector and " +
+            "takes precedence once saved there. Calling search space applied to every call-forward " +
+            "variant (All, Busy, No Answer, No Coverage, On Failure, Not Registered - internal and " +
+            "external) on a classroom user's DN. Forward-to-voicemail is always left off in favor " +
+            "of this CSS. Omit to leave a classroom user line's forward settings unmanaged.",
         required: false)
     .Setting(
         "user-did-css-activation-policy",
-        "Calling search space activation policy applied to a classroom user's DN " +
-            "(e.g. 'Use System Default').",
+        "Deprecated: use 'vt cucm configure defaults' instead, which takes precedence once saved " +
+            "there. Calling search space activation policy applied to a classroom user's DN. Must " +
+            "match the literal text of an option in CUCM's 'Calling Search Space Activation " +
+            "Policy' dropdown on this system (Call Routing -> Directory Number) - not " +
+            "verified/enumerable via AXL, so copy it exactly from CUCM Administration rather than " +
+            "guessing.",
         required: false,
         defaultValue: "Use System Default")
     .Setting(
+        "css-activation-policy-choices",
+        "Comma-separated list of valid values for CUCM's 'Calling Search Space Activation Policy' " +
+            "dropdown on this system, copied verbatim from Call Routing -> Directory Number in CUCM " +
+            "Administration (there is no AXL operation to enumerate this - it's a fixed schema enum, " +
+            "not a queryable live object like route partitions or calling search spaces). When set, " +
+            "'vt cucm configure defaults' offers a picker built from this list instead of free " +
+            "text; leave unset to type the value directly.",
+        required: false)
+    .Setting(
         "user-did-no-answer-ring-duration",
-        "Ring duration, in seconds, applied to the 'No Answer' and 'No Answer Internal' call " +
-            "forward settings on a classroom user's DN. Omit to leave the ring duration unmanaged.",
+        "Deprecated: use 'vt cucm configure defaults' instead, which takes precedence once saved " +
+            "there. Ring duration, in seconds, applied to the 'No Answer' and 'No Answer Internal' " +
+            "call forward settings on a classroom user's DN. Omit to leave the ring duration " +
+            "unmanaged.",
         required: false)
     .Secret("AXL_USERNAME", "CUCM AXL username")
     .Secret("AXL_PASSWORD", "CUCM AXL password")
@@ -209,6 +235,12 @@ static async ValueTask<ModuleCommandOutcome> ConfigureAsync(ModuleContext contex
     try
     {
         using var cucm = await CreateCucmAsync(context);
+        if (context.Arguments.Count > 0 && context.Arguments[0] == "defaults")
+        {
+            return await ModuleDefaultsConfigurationCommand.ExecuteAsync(
+                context with { Arguments = context.Arguments.Skip(1).ToArray() },
+                cucm);
+        }
         return await BuildingConfigurationCommand.ExecuteAsync(context, cucm);
     }
     catch (Exception exception) when (IsExpected(exception))
@@ -259,6 +291,9 @@ static async ValueTask<ModuleCommandOutcome> ProvisionAsync(ModuleContext contex
         }
         if (context.Arguments is ["new-product", var productName, var productDescription])
         {
+            // No AXL 'list' operation enumerates phone models/products (only reachable via
+            // undocumented internal SQL tables, which Cisco's own AXL docs advise against relying
+            // on since they can change without notice) - stays free text.
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Provision {productName}",
                 "Product (e.g. \"Cisco 8841\")",
@@ -895,6 +930,7 @@ static async ValueTask<ModuleCommandOutcome> TemplatesAsync(ModuleContext contex
     try
     {
         using var cucm = await CreateCucmAsync(context);
+        var resourceQueries = new CucmResourceQueryService(cucm);
         var store = new LineTemplateStore(context.DataDirectory);
         if (context.Arguments.Count == 0)
         {
@@ -1016,13 +1052,8 @@ static async ValueTask<ModuleCommandOutcome> TemplatesAsync(ModuleContext contex
                     ["<None>", string.Empty],
                     ["templates", "add-dn", partitionTemplateName, partitionKind, string.Empty]),
             };
-            await foreach (var partition in cucm.ListRoutePartitionsAsync(
-                cancellationToken: context.CancellationToken))
+            foreach (var partition in await resourceQueries.ListRoutePartitionsAsync(context.CancellationToken))
             {
-                if (string.IsNullOrWhiteSpace(partition.Name))
-                {
-                    continue;
-                }
                 rows.Add(new ModuleTableRow(
                     partition.Uuid ?? $"partition:{partition.Name}",
                     [Clean(partition.Name), Clean(partition.Description)],
@@ -1126,13 +1157,8 @@ static async ValueTask<ModuleCommandOutcome> TemplatesAsync(ModuleContext contex
                         voicemailMaskRaw, string.Empty,
                     ]),
             };
-            await foreach (var profile in cucm.ListVoiceMailProfilesAsync(
-                cancellationToken: context.CancellationToken))
+            foreach (var profile in await resourceQueries.ListVoiceMailProfilesAsync(context.CancellationToken))
             {
-                if (string.IsNullOrWhiteSpace(profile.Name))
-                {
-                    continue;
-                }
                 voicemailRows.Add(new ModuleTableRow(
                     profile.Uuid ?? $"voicemail-profile:{profile.Name}",
                     [Clean(profile.Name), Clean(profile.Description)],
@@ -1957,14 +1983,10 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         userLineForCheck.Pattern,
                         userLineForCheck.RoutePartitionName,
                         context.CancellationToken);
-                var expectedForwardCss = Normalize(context.Configuration.GetValueOrDefault("user-did-forward-css"));
-                var expectedActivationPolicy =
-                    Normalize(context.Configuration.GetValueOrDefault("user-did-css-activation-policy"));
-                var expectedRingDuration = int.TryParse(
-                    context.Configuration.GetValueOrDefault("user-did-no-answer-ring-duration"),
-                    out var ringDuration)
-                    ? ringDuration
-                    : (int?)null;
+                var userDidDefaults = await LoadModuleDefaultsAsync(context);
+                var expectedForwardCss = Normalize(userDidDefaults.ForwardCallingSearchSpace);
+                var expectedActivationPolicy = Normalize(userDidDefaults.CallingSearchSpaceActivationPolicy);
+                var expectedRingDuration = userDidDefaults.NoAnswerRingDurationSeconds;
                 var voiceMailProfiles = new List<string>();
                 await foreach (var resource in cucm.ListVoiceMailProfilesAsync(
                     cancellationToken: context.CancellationToken))
@@ -3271,6 +3293,8 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
         }
         if (context.Arguments is ["add-product", var productPhoneName, var productDescription])
         {
+            // See the same note in ProvisionAsync's 'new-product' handler: no AXL fetcher exists
+            // for phone models, so this stays free text.
             return ModuleCommandResult.Render(new ModuleTextPromptResponse(
                 $"Add phone {productPhoneName}",
                 "Product (e.g. \"Cisco 8841\")",
@@ -3559,8 +3583,7 @@ static async Task<IReadOnlyList<UserDid>> LoadAvailableUserDidsAsync(
     CucmService cucm)
 {
     var dids = await new UserDidStore(context.DataDirectory).LoadAsync(context.CancellationToken);
-    var scanPartitions = UserDidReconciler.ParsePartitions(
-        context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+    var scanPartitions = (await LoadModuleDefaultsAsync(context)).ScanPartitions;
     if (scanPartitions.Count == 0)
     {
         return dids.Where(did => did.Assignment is null).ToArray();
@@ -3584,8 +3607,8 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
     {
         var store = new UserDidStore(context.DataDirectory);
         var reservedStore = new ReservedExtensionStore(context.DataDirectory);
-        var scanPartitions = UserDidReconciler.ParsePartitions(
-            context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+        var userDidDefaults = await LoadModuleDefaultsAsync(context);
+        var scanPartitions = userDidDefaults.ScanPartitions;
         if (context.Arguments.Count == 0)
         {
             return ModuleCommandResult.Render(new ModuleTableResponse(
@@ -3932,10 +3955,10 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
             var replacementPatterns = UserDidStore.ParsePatterns(confirmedReplacementValues);
             await store.ReplaceAsync(
                 replacementPatterns,
-                context.Configuration.GetValueOrDefault("user-did-partition"),
-                context.Configuration.GetValueOrDefault("user-did-description-prefix"),
-                context.Configuration.GetValueOrDefault("user-did-css"),
-                context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
+                userDidDefaults.Partition,
+                userDidDefaults.DescriptionPrefix,
+                userDidDefaults.CallingSearchSpace,
+                userDidDefaults.VoiceMailProfile,
                 context.CancellationToken);
             return ModuleCommandResult.Ok(
                 $"Replaced the local inventory with {replacementPatterns.Count} user DNs.");
@@ -3947,10 +3970,10 @@ static async ValueTask<ModuleCommandOutcome> UserDidsAsync(ModuleContext context
             var patterns = UserDidStore.ParsePatterns(values);
             var added = await store.AddAsync(
                 patterns,
-                context.Configuration.GetValueOrDefault("user-did-partition"),
-                context.Configuration.GetValueOrDefault("user-did-description-prefix"),
-                context.Configuration.GetValueOrDefault("user-did-css"),
-                context.Configuration.GetValueOrDefault("user-did-voicemail-profile"),
+                userDidDefaults.Partition,
+                userDidDefaults.DescriptionPrefix,
+                userDidDefaults.CallingSearchSpace,
+                userDidDefaults.VoiceMailProfile,
                 context.CancellationToken);
             return ModuleCommandResult.Ok(
                 $"Added {added} user DN{(added == 1 ? string.Empty : "s")}; " +
@@ -3990,8 +4013,7 @@ static async Task<UserDid> RequireAvailableUserDidAsync(
 
     // Guard against handing out a DID that CUCM shows is already in use or reserved by function,
     // even though nothing in this tool's own bookkeeping recorded that assignment.
-    var scanPartitions = UserDidReconciler.ParsePartitions(
-        context.Configuration.GetValueOrDefault("user-did-scan-partitions"));
+    var scanPartitions = (await LoadModuleDefaultsAsync(context)).ScanPartitions;
     if (scanPartitions.Count > 0)
     {
         IReadOnlyList<string> candidatePartitions = did.RoutePartitionName is { } didPartition
@@ -4047,6 +4069,11 @@ static Task<IReadOnlyDictionary<string, BuildingPattern>> LoadBuildingPatternsAs
     ModuleContext context) =>
     new BuildingProfileStore(context.DataDirectory).LoadEffectiveAsync(
         context.Configuration.GetValueOrDefault("building-patterns"),
+        context.CancellationToken);
+
+static Task<ModuleDefaults> LoadModuleDefaultsAsync(ModuleContext context) =>
+    new ModuleDefaultsStore(context.DataDirectory).LoadEffectiveAsync(
+        context.Configuration,
         context.CancellationToken);
 
 // Recomputes and (if changed) saves a phone's CUCM Description as a compliance summary, derived from
@@ -4170,20 +4197,21 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         userDidSelection.Did.Pattern,
         userDidSelection.Did.RoutePartitionName,
         context.CancellationToken);
+    var userDidDefaults = await LoadModuleDefaultsAsync(context);
     var userDid = userDidSelection.Did with
     {
         RoutePartitionName = userDirectoryNumber?.RoutePartitionName ??
             userDidSelection.Did.RoutePartitionName ??
-            Normalize(context.Configuration.GetValueOrDefault("user-did-partition")),
+            Normalize(userDidDefaults.Partition),
         Description = userDirectoryNumber?.Description ?? userDidSelection.Did.Description ??
-            $"{context.Configuration.GetValueOrDefault("user-did-description-prefix") ?? "User DID"} " +
+            $"{userDidDefaults.DescriptionPrefix ?? "User DID"} " +
             userDidSelection.Did.Pattern,
         CallingSearchSpaceName = userDirectoryNumber?.CallingSearchSpaceName ??
             userDidSelection.Did.CallingSearchSpaceName ??
-            Normalize(context.Configuration.GetValueOrDefault("user-did-css")),
+            Normalize(userDidDefaults.CallingSearchSpace),
         VoiceMailProfileName = userDirectoryNumber?.VoiceMailProfileName ??
             userDidSelection.Did.VoiceMailProfileName ??
-            Normalize(context.Configuration.GetValueOrDefault("user-did-voicemail-profile")),
+            Normalize(userDidDefaults.VoiceMailProfile),
     };
     var roomDirectoryNumber = await cucm.GetDirectoryNumberAsync(
         roomNumber,
@@ -4194,17 +4222,13 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         !previousOwnerUserId.Equals(userId, StringComparison.OrdinalIgnoreCase)
         ? await cucm.GetUserAsync(previousOwnerUserId, context.CancellationToken)
         : null;
-    var roomTemplateName = RequireConfigurationValue(context, "classroom-room-line-template");
-    var userTemplateName = RequireConfigurationValue(context, "classroom-user-line-template");
+    var roomTemplateName = RequireModuleDefault(userDidDefaults.ClassroomRoomLineTemplate, "classroom-room-line-template");
+    var userTemplateName = RequireModuleDefault(userDidDefaults.ClassroomUserLineTemplate, "classroom-user-line-template");
     var roomTemplate = await RequireLineTemplateAsync(context, roomTemplateName);
     var userTemplate = await RequireLineTemplateAsync(context, userTemplateName);
-    var userForwardCss = Normalize(context.Configuration.GetValueOrDefault("user-did-forward-css"));
-    var userCssActivationPolicy =
-        Normalize(context.Configuration.GetValueOrDefault("user-did-css-activation-policy"));
-    var userNoAnswerRingDuration =
-        int.TryParse(context.Configuration.GetValueOrDefault("user-did-no-answer-ring-duration"), out var ringDuration)
-            ? ringDuration
-            : (int?)null;
+    var userForwardCss = Normalize(userDidDefaults.ForwardCallingSearchSpace);
+    var userCssActivationPolicy = Normalize(userDidDefaults.CallingSearchSpaceActivationPolicy);
+    var userNoAnswerRingDuration = userDidDefaults.NoAnswerRingDurationSeconds;
 
     return ClassroomPhonePlanner.Create(new ClassroomPhonePlanInput(
         phone,
@@ -4226,8 +4250,10 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         userNoAnswerRingDuration));
 }
 
-static string RequireConfigurationValue(ModuleContext context, string key) =>
-    ClassroomConfiguration.RequireValue(context.Configuration, key);
+static string RequireModuleDefault(string? value, string key) =>
+    !string.IsNullOrWhiteSpace(value)
+        ? value.Trim()
+        : throw new InvalidOperationException($"CUCM setting '{key}' is required for the classroom workflow.");
 
 static async Task<UserDidSelection> SelectUserDidForPhoneAsync(
     ModuleContext context,
@@ -4353,6 +4379,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
     try
     {
         using var cucm = await CreateCucmAsync(context);
+        var resourceQueries = new CucmResourceQueryService(cucm);
         if (TryParseListArguments(context.Arguments, out var maxRecords, out var pageSize))
         {
             var rows = new List<ModuleTableRow>();
@@ -4444,6 +4471,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
                 current.RoutePartitionName ?? editPartition,
                 current.CallingSearchSpaceName,
                 current.VoiceMailProfileName,
+                current.CallPickupGroupName,
                 current.CallForwardAll.Destination,
                 current.CallForwardAll.CallingSearchSpaceName,
                 current.CallForwardAll.ForwardToVoiceMail);
@@ -4458,7 +4486,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select line calling search space",
                 "edit-voicemail-profile",
                 editCssBaseState with { Description = Normalize(editDescription) },
@@ -4468,11 +4496,21 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select voicemail profile",
-                "edit-forward",
+                "edit-pickup-group",
                 editCssState,
                 "voicemail-profile"));
+        }
+        if (TryParseWizardState(context.Arguments, "edit-pickup-group", out var editVoicemailPickupState))
+        {
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
+                context,
+                resourceQueries,
+                "Select call pickup group",
+                "edit-forward",
+                editVoicemailPickupState,
+                "pickup-group"));
         }
         if (TryParseWizardState(context.Arguments, "edit-forward", out var editVoicemailState))
         {
@@ -4500,7 +4538,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select forward-all calling search space",
                 "edit-review",
                 editDestinationValueState with { ForwardDestination = editForwardDestination },
@@ -4513,7 +4551,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select forward-all calling search space",
                 "edit-review",
                 editVoicemailForwardState with { ForwardToVoiceMail = true },
@@ -4595,7 +4633,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select route partition",
                 "add-css",
                 new DnWizardState(partitionPattern, description),
@@ -4605,7 +4643,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select line calling search space",
                 "add-voicemail-profile",
                 partitionState,
@@ -4618,11 +4656,24 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select voicemail profile",
-                "add-forward",
+                "add-pickup-group",
                 cssState,
                 "voicemail-profile"));
+        }
+        if (TryParseWizardState(
+            context.Arguments,
+            "add-pickup-group",
+            out var voicemailPickupState))
+        {
+            return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
+                context,
+                resourceQueries,
+                "Select call pickup group",
+                "add-forward",
+                voicemailPickupState,
+                "pickup-group"));
         }
         if (TryParseWizardState(context.Arguments, "add-forward", out var forwardingState))
         {
@@ -4650,7 +4701,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select forward-all calling search space",
                 "add-review",
                 destinationValueState with { ForwardDestination = forwardDestination },
@@ -4663,7 +4714,7 @@ static async ValueTask<ModuleCommandOutcome> DirectoryNumbersAsync(ModuleContext
         {
             return ModuleCommandResult.Render(await CreateNamedSelectorResponseAsync(
                 context,
-                cucm,
+                resourceQueries,
                 "Select forward-all calling search space",
                 "add-review",
                 voicemailForwardState with { ForwardToVoiceMail = true },
@@ -4744,7 +4795,7 @@ static ModuleResponse CreateDirectoryNumberInfoResponse(CucmDirectoryNumber line
 
     static async Task<ModuleResponse> CreateNamedSelectorResponseAsync(
     ModuleContext context,
-    CucmService cucm,
+    CucmResourceQueryService resourceQueries,
     string title,
     string nextRoute,
     DnWizardState state,
@@ -4756,19 +4807,14 @@ static ModuleResponse CreateDirectoryNumberInfoResponse(CucmDirectoryNumber line
     };
     var resources = resourceType switch
     {
-        "partition" => cucm.ListRoutePartitionsAsync(cancellationToken: context.CancellationToken),
-        "css" or "forward-css" => cucm.ListCallingSearchSpacesAsync(
-            cancellationToken: context.CancellationToken),
-        "voicemail-profile" => cucm.ListVoiceMailProfilesAsync(
-            cancellationToken: context.CancellationToken),
+        "partition" => await resourceQueries.ListRoutePartitionsAsync(context.CancellationToken),
+        "css" or "forward-css" => await resourceQueries.ListCallingSearchSpacesAsync(context.CancellationToken),
+        "voicemail-profile" => await resourceQueries.ListVoiceMailProfilesAsync(context.CancellationToken),
+        "pickup-group" => await resourceQueries.ListCallPickupGroupsAsync(context.CancellationToken),
         _ => throw new InvalidOperationException($"Unknown CUCM resource type '{resourceType}'."),
     };
-    await foreach (var resource in resources)
+    foreach (var resource in resources)
     {
-        if (string.IsNullOrWhiteSpace(resource.Name))
-        {
-            continue;
-        }
         rows.Add(new ModuleTableRow(
             resource.Uuid ?? $"{resourceType}:{resource.Name}",
             [Clean(resource.Name), Clean(resource.Description)],
@@ -4817,7 +4863,7 @@ static ModuleResponse CreateForwardingSelectorResponse(
             : state.ForwardDestination;
     return new ModuleTableResponse(
         title,
-        ["PATTERN", "PARTITION", "DESCRIPTION", "CSS", "VOICEMAIL", "FORWARD ALL", "FORWARD CSS"],
+        ["PATTERN", "PARTITION", "DESCRIPTION", "CSS", "VOICEMAIL", "PICKUP GROUP", "FORWARD ALL", "FORWARD CSS"],
         [
             new ModuleTableRow(
                 "submit",
@@ -4827,6 +4873,7 @@ static ModuleResponse CreateForwardingSelectorResponse(
                     Clean(state.Description),
                     Clean(state.CallingSearchSpaceName),
                     Clean(state.VoiceMailProfileName),
+                    DisplayPartition(state.CallPickupGroupName),
                     Clean(forwarding),
                     Clean(state.ForwardCallingSearchSpaceName),
                 ],
@@ -4843,6 +4890,7 @@ static DnWizardState SetWizardResource(
     "partition" => state with { RoutePartitionName = value },
     "css" => state with { CallingSearchSpaceName = value },
     "voicemail-profile" => state with { VoiceMailProfileName = value },
+    "pickup-group" => state with { CallPickupGroupName = value },
     "forward-css" => state with { ForwardCallingSearchSpaceName = value },
     _ => throw new InvalidOperationException($"Unknown CUCM resource type '{resourceType}'."),
 };
@@ -5114,6 +5162,7 @@ static IReadOnlyList<string> WizardArguments(string route, DnWizardState state) 
         state.RoutePartitionName ?? string.Empty,
         state.CallingSearchSpaceName ?? string.Empty,
         state.VoiceMailProfileName ?? string.Empty,
+        state.CallPickupGroupName ?? string.Empty,
         state.ForwardDestination ?? string.Empty,
         state.ForwardCallingSearchSpaceName ?? string.Empty,
         state.ForwardToVoiceMail.ToString(),
@@ -5125,7 +5174,7 @@ static bool TryParseWizardState(
     out DnWizardState state)
 {
     state = new DnWizardState(string.Empty);
-    if (arguments.Count != 9 || arguments[0] != route)
+    if (arguments.Count != 10 || arguments[0] != route)
     {
         return false;
     }
@@ -5137,7 +5186,8 @@ static bool TryParseWizardState(
         Normalize(arguments[5]),
         Normalize(arguments[6]),
         Normalize(arguments[7]),
-        bool.TryParse(arguments[8], out var forwardToVoiceMail) && forwardToVoiceMail);
+        Normalize(arguments[8]),
+        bool.TryParse(arguments[9], out var forwardToVoiceMail) && forwardToVoiceMail);
     return true;
 }
 
@@ -5149,11 +5199,11 @@ static bool TryParseWizardStateWithValue(
 {
     state = new DnWizardState(string.Empty);
     value = string.Empty;
-    if (arguments.Count != 10 || !TryParseWizardState(arguments.Take(9).ToArray(), route, out state))
+    if (arguments.Count != 11 || !TryParseWizardState(arguments.Take(10).ToArray(), route, out state))
     {
         return false;
     }
-    value = arguments[9];
+    value = arguments[10];
     return !string.IsNullOrWhiteSpace(value);
 }
 
@@ -5167,11 +5217,11 @@ static bool TryParseWizardStateWithOptionalValue(
 {
     state = new DnWizardState(string.Empty);
     value = string.Empty;
-    if (arguments.Count != 10 || !TryParseWizardState(arguments.Take(9).ToArray(), route, out state))
+    if (arguments.Count != 11 || !TryParseWizardState(arguments.Take(10).ToArray(), route, out state))
     {
         return false;
     }
-    value = arguments[9];
+    value = arguments[10];
     return true;
 }
 
@@ -5290,6 +5340,7 @@ sealed record DnWizardState(
     string? RoutePartitionName = null,
     string? CallingSearchSpaceName = null,
     string? VoiceMailProfileName = null,
+    string? CallPickupGroupName = null,
     string? ForwardDestination = null,
     string? ForwardCallingSearchSpaceName = null,
     bool ForwardToVoiceMail = false)
@@ -5308,7 +5359,8 @@ sealed record DnWizardState(
             Description,
             CallingSearchSpaceName,
             VoiceMailProfileName,
-            callForwardAll);
+            callForwardAll,
+            CallPickupGroupName: CallPickupGroupName);
     }
 
     public CucmDirectoryNumberUpdateRequest ToUpdateRequest()
@@ -5325,7 +5377,8 @@ sealed record DnWizardState(
             Description,
             CallingSearchSpaceName,
             VoiceMailProfileName,
-            callForwardAll);
+            callForwardAll,
+            CallPickupGroupName: CallPickupGroupName);
     }
 }
 

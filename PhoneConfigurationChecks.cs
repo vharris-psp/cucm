@@ -23,6 +23,9 @@ internal sealed record PhoneAssignment(
     string? RoomNumber,
     string? Location);
 
+// The config-declared portion of 'phone-check-placeholder', independent of any live phone data.
+internal sealed record PhoneCheckPlaceholder(string? UserDn, string? RoomNumber, string? Location);
+
 internal sealed record PhoneCheckResult(
     string Name,
     string Expected,
@@ -115,6 +118,23 @@ internal static class PhoneConfigurationChecks
                 "CUCM setting 'phone-check-placeholder' must be a JSON object.");
         }
 
+        var placeholder = ParsePhoneCheckPlaceholder(configuration);
+        return new PhoneAssignment(
+            Normalize(phone.OwnerUserName),
+            placeholder.UserDn,
+            placeholder.RoomNumber,
+            placeholder.Location);
+    }
+
+    // The config-declared portion of 'phone-check-placeholder' (everything except the live
+    // phone's owner, which ResolvePlaceholderAssignment merges in separately).
+    internal static PhoneCheckPlaceholder ParsePhoneCheckPlaceholder(string configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration))
+        {
+            return new PhoneCheckPlaceholder(null, null, null);
+        }
+
         try
         {
             using var document = JsonDocument.Parse(configuration);
@@ -124,8 +144,7 @@ internal static class PhoneConfigurationChecks
                     "CUCM setting 'phone-check-placeholder' must be a JSON object.");
             }
 
-            return new PhoneAssignment(
-                Normalize(phone.OwnerUserName),
+            return new PhoneCheckPlaceholder(
                 ReadString(document.RootElement, "userDn"),
                 ReadString(document.RootElement, "roomNumber"),
                 ReadString(document.RootElement, "location"));
@@ -211,25 +230,36 @@ internal static class PhoneConfigurationChecks
                         $"Building '{property.Name}' in 'building-patterns' is missing a non-empty " +
                         "'routePartitionName'.");
                 }
+                // Accepts a JSON array OR a comma-separated string; the latter avoids literal '[' ']'
+                // characters, which crash 'vt module configure's markup renderer on this setting's value.
                 var devicePools = new List<string>();
                 if (property.Value.TryGetProperty("devicePools", out var devicePoolsNode))
                 {
-                    if (devicePoolsNode.ValueKind != JsonValueKind.Array)
+                    if (devicePoolsNode.ValueKind == JsonValueKind.String)
+                    {
+                        devicePools.AddRange(
+                            (devicePoolsNode.GetString() ?? string.Empty)
+                                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                    }
+                    else if (devicePoolsNode.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var devicePool in devicePoolsNode.EnumerateArray())
+                        {
+                            if (devicePool.ValueKind != JsonValueKind.String ||
+                                string.IsNullOrWhiteSpace(devicePool.GetString()))
+                            {
+                                throw new InvalidOperationException(
+                                    $"Building '{property.Name}' in 'building-patterns' has a non-string " +
+                                    "or empty entry in 'devicePools'.");
+                            }
+                            devicePools.Add(devicePool.GetString()!.Trim());
+                        }
+                    }
+                    else
                     {
                         throw new InvalidOperationException(
                             $"Building '{property.Name}' in 'building-patterns' has a 'devicePools' " +
-                            "value that is not an array.");
-                    }
-                    foreach (var devicePool in devicePoolsNode.EnumerateArray())
-                    {
-                        if (devicePool.ValueKind != JsonValueKind.String ||
-                            string.IsNullOrWhiteSpace(devicePool.GetString()))
-                        {
-                            throw new InvalidOperationException(
-                                $"Building '{property.Name}' in 'building-patterns' has a non-string " +
-                                "or empty entry in 'devicePools'.");
-                        }
-                        devicePools.Add(devicePool.GetString()!.Trim());
+                            "value that is not an array or comma-separated string.");
                     }
                 }
                 var devicePoolName = ReadString(property.Value, "devicePoolName");
@@ -285,43 +315,63 @@ internal static class PhoneConfigurationChecks
                         "to objects with a 'slots' array.");
                 }
                 if (!property.Value.TryGetProperty("slots", out var slotsNode) ||
-                    slotsNode.ValueKind != JsonValueKind.Array)
+                    slotsNode.ValueKind is not (JsonValueKind.Array or JsonValueKind.String))
                 {
                     throw new InvalidOperationException(
                         $"Phone button template '{property.Name}' in 'template-compliance-policies' is " +
-                        "missing a 'slots' array.");
+                        "missing a 'slots' array or comma-separated 'index:kind' string.");
                 }
-                var slots = new List<TemplateComplianceSlot>();
-                foreach (var slotNode in slotsNode.EnumerateArray())
+                TemplateComplianceSlotKind ParseSlotKind(string rawKind) => rawKind.Trim().ToLowerInvariant() switch
                 {
-                    if (slotNode.ValueKind != JsonValueKind.Object ||
-                        !slotNode.TryGetProperty("index", out var indexNode) ||
-                        indexNode.ValueKind != JsonValueKind.Number ||
-                        !slotNode.TryGetProperty("kind", out var kindNode) ||
-                        kindNode.ValueKind != JsonValueKind.String)
+                    "user" => TemplateComplianceSlotKind.User,
+                    "room" => TemplateComplianceSlotKind.Room,
+                    "speeddial" => TemplateComplianceSlotKind.SpeedDial,
+                    var other => throw new InvalidOperationException(
+                        $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                        $"an unknown slot kind '{other}'; expected 'user', 'room', or 'speeddial'."),
+                };
+                var slots = new List<TemplateComplianceSlot>();
+                // A bracket-free "index:kind,index:kind" string is also accepted; literal '[' ']'
+                // characters crash 'vt module configure's markup renderer on this setting's value.
+                if (slotsNode.ValueKind == JsonValueKind.String)
+                {
+                    foreach (var entry in (slotsNode.GetString() ?? string.Empty)
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
-                        throw new InvalidOperationException(
-                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
-                            "an invalid slot entry; each slot needs an integer 'index' and a 'kind' of " +
-                            "'user', 'room', or 'speeddial'.");
+                        var parts = entry.Split(':', 2);
+                        if (parts.Length != 2 || !int.TryParse(parts[0], out var slotIndex) || slotIndex <= 0)
+                        {
+                            throw new InvalidOperationException(
+                                $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                                $"an invalid slot entry '{entry}'; expected 'index:kind'.");
+                        }
+                        slots.Add(new TemplateComplianceSlot(slotIndex, ParseSlotKind(parts[1])));
                     }
-                    var index = indexNode.GetInt32();
-                    if (index <= 0)
+                }
+                else
+                {
+                    foreach (var slotNode in slotsNode.EnumerateArray())
                     {
-                        throw new InvalidOperationException(
-                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
-                            "a slot with a non-positive index.");
+                        if (slotNode.ValueKind != JsonValueKind.Object ||
+                            !slotNode.TryGetProperty("index", out var indexNode) ||
+                            indexNode.ValueKind != JsonValueKind.Number ||
+                            !slotNode.TryGetProperty("kind", out var kindNode) ||
+                            kindNode.ValueKind != JsonValueKind.String)
+                        {
+                            throw new InvalidOperationException(
+                                $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                                "an invalid slot entry; each slot needs an integer 'index' and a 'kind' of " +
+                                "'user', 'room', or 'speeddial'.");
+                        }
+                        var index = indexNode.GetInt32();
+                        if (index <= 0)
+                        {
+                            throw new InvalidOperationException(
+                                $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
+                                "a slot with a non-positive index.");
+                        }
+                        slots.Add(new TemplateComplianceSlot(index, ParseSlotKind(kindNode.GetString()!)));
                     }
-                    var kind = kindNode.GetString()!.Trim().ToLowerInvariant() switch
-                    {
-                        "user" => TemplateComplianceSlotKind.User,
-                        "room" => TemplateComplianceSlotKind.Room,
-                        "speeddial" => TemplateComplianceSlotKind.SpeedDial,
-                        var other => throw new InvalidOperationException(
-                            $"Phone button template '{property.Name}' in 'template-compliance-policies' has " +
-                            $"an unknown slot kind '{other}'; expected 'user', 'room', or 'speeddial'."),
-                    };
-                    slots.Add(new TemplateComplianceSlot(index, kind));
                 }
                 policies[property.Name.Trim()] = new TemplateCompliancePolicy(slots);
             }
