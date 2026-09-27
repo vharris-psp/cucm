@@ -7,6 +7,11 @@ internal static class BuildingConfigurationCommand
         ModuleContext context,
         CucmService cucm)
     {
+        if (LoadingStatus(context.Arguments) is { } loadingStatus)
+        {
+            await context.ReportProgressAsync(loadingStatus, 0, 1);
+        }
+
         var store = new BuildingProfileStore(context.DataDirectory);
         var resourceQueries = new CucmResourceQueryService(cucm);
         var legacyConfiguration = context.Configuration.GetValueOrDefault("building-patterns");
@@ -340,6 +345,23 @@ internal static class BuildingConfigurationCommand
             "Usage: vt cucm configure [buildings]",
             exitCode: 2);
     }
+
+    internal static string? LoadingStatus(IReadOnlyList<string> arguments) => arguments switch
+    {
+        ["buildings"] => "Loading building profiles",
+        ["buildings", "select", var code] => $"Loading building profile '{code}'",
+        ["buildings", "add-code", ..] or ["buildings", "edit-partition", ..] =>
+            "Loading CUCM route partitions",
+        ["buildings", "edit-device-pool", ..] => "Loading CUCM device pools",
+        ["buildings", "edit-recognized", ..] => "Loading recognized device pools",
+        ["buildings", "edit-template", ..] => "Loading CUCM phone button templates",
+        ["buildings", "edit-mask", var code, ..] => $"Loading external call mask for '{code}'",
+        ["buildings", "edit-allcall", var code, ..] => $"Loading All Call number for '{code}'",
+        ["buildings", "edit-review", var code, ..] => $"Loading building profile review for '{code}'",
+        ["buildings", "delete-review", var code] => $"Loading deletion review for '{code}'",
+        ["buildings", "import-review"] => "Loading legacy building profiles",
+        _ => null,
+    };
 
     private static async Task<ModuleTableResponse> CreatePartitionSelectorAsync(
         CucmResourceQueryService resourceQueries,

@@ -56,6 +56,30 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
         Assert.Equal("HS-Rooms", Assert.Single(stored).Value.RoutePartitionName);
     }
 
+    [Theory]
+    [InlineData("edit-mask", "Loading external call mask for 'PHS'")]
+    [InlineData("edit-allcall", "Loading All Call number for 'PHS'")]
+    public void LoadingStatusDescribesOptionalBuildingValue(string route, string expected)
+    {
+        var arguments = route == "edit-mask"
+            ? new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "HighSchool", "Template" }
+            : new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "HighSchool", "Template", "231347XXXX" };
+
+        Assert.Equal(expected, BuildingConfigurationCommand.LoadingStatus(arguments));
+    }
+
+    [Theory]
+    [InlineData("edit-partition", "Loading CUCM route partitions")]
+    [InlineData("edit-css", "Loading CUCM calling search spaces")]
+    [InlineData("edit-voicemail", "Loading CUCM voicemail profiles")]
+    [InlineData("edit-forward-css", "Loading CUCM forward calling search spaces")]
+    [InlineData("edit-classroom-room-line-template", "Loading room line templates")]
+    [InlineData("edit-classroom-user-line-template", "Loading user line templates")]
+    public void DefaultsLoadingStatusDescribesSelectedResource(string route, string expected)
+    {
+        Assert.Equal(expected, ModuleDefaultsConfigurationCommand.LoadingStatus([route]));
+    }
+
     private ModuleContext CreateContext(IReadOnlyList<string> arguments) =>
         new(
             arguments,

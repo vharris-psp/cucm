@@ -10,6 +10,11 @@ internal static class ModuleDefaultsConfigurationCommand
         ModuleContext context,
         CucmService cucm)
     {
+        if (LoadingStatus(context.Arguments) is { } loadingStatus)
+        {
+            await context.ReportProgressAsync(loadingStatus, 0, 1);
+        }
+
         var store = new ModuleDefaultsStore(context.DataDirectory);
         var resourceQueries = new CucmResourceQueryService(cucm);
 
@@ -190,6 +195,19 @@ internal static class ModuleDefaultsConfigurationCommand
 
         return ModuleCommandResult.Fail("Usage: vt cucm configure defaults", exitCode: 2);
     }
+
+    internal static string? LoadingStatus(IReadOnlyList<string> arguments) => arguments switch
+    {
+        [] => "Loading module defaults",
+        ["edit-partition"] => "Loading CUCM route partitions",
+        ["edit-css"] => "Loading CUCM calling search spaces",
+        ["edit-voicemail"] => "Loading CUCM voicemail profiles",
+        ["edit-forward-css"] => "Loading CUCM forward calling search spaces",
+        ["edit-activation-policy"] => "Loading CSS activation policy choices",
+        ["edit-classroom-room-line-template"] => "Loading room line templates",
+        ["edit-classroom-user-line-template"] => "Loading user line templates",
+        _ => null,
+    };
 
     private static async Task<ModuleTableResponse> CreateResourceSelectorAsync(
         CucmResourceQueryService resourceQueries,
