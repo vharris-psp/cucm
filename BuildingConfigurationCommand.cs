@@ -255,16 +255,36 @@ internal static class BuildingConfigurationCommand
             var currentAllCall = profiles.TryGetValue(NormalizeCode(allCallCode), out var allCallProfile)
                 ? allCallProfile.AllCallNumber
                 : null;
-            return ModuleCommandResult.Render(new ModuleTextPromptResponse(
+            string[] ReviewArguments(string selectedNumber) =>
+            [
+                "configure", "buildings", "edit-review", allCallCode,
+                allCallPartition, allCallTargetPool, allCallLocation, allCallPoolsRaw,
+                allCallTemplate, allCallMaskRaw, selectedNumber,
+            ];
+            var rows = new List<ModuleTableRow>
+            {
+                new(
+                    "none",
+                    ["<None>", string.Empty, "Leave All Call unconfigured", currentAllCall is null ? "Current" : string.Empty],
+                    ReviewArguments(string.Empty)),
+            };
+            foreach (var line in await resourceQueries.ListDirectoryNumbersAsync(context.CancellationToken))
+            {
+                var pattern = line.Pattern!;
+                rows.Add(new ModuleTableRow(
+                    line.Uuid ?? $"directory-number:{pattern}:{line.RoutePartitionName}",
+                    [
+                        pattern,
+                        line.RoutePartitionName ?? "<none>",
+                        Clean(line.Description),
+                        string.Equals(pattern, currentAllCall, StringComparison.Ordinal) ? "Current" : string.Empty,
+                    ],
+                    ReviewArguments(pattern)));
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
                 $"All Call number for {allCallCode}",
-                "Speed-dial destination for this building's All Call button (leave blank to configure later)",
-                [
-                    "configure", "buildings", "edit-review", allCallCode,
-                    allCallPartition, allCallTargetPool, allCallLocation, allCallPoolsRaw,
-                    allCallTemplate, allCallMaskRaw,
-                ],
-                currentAllCall,
-                AllowEmpty: true));
+                ["PATTERN", "PARTITION", "DESCRIPTION", "SELECTION"],
+                rows));
         }
 
         if (context.Arguments is

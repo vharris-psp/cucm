@@ -78,6 +78,47 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
             pool.Arguments);
     }
 
+        [Fact]
+        public async Task AllCallUsesLiveDirectoryNumberSelector()
+        {
+                var handler = new FakeHandler(
+                        """
+                        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+                            <soapenv:Body>
+                                <listLineResponse>
+                                    <return>
+                                        <line uuid="line-uuid">
+                                            <pattern>#9000</pattern>
+                                            <routePartitionName>Local</routePartitionName>
+                                            <description>All Call</description>
+                                        </line>
+                                    </return>
+                                </listLineResponse>
+                            </soapenv:Body>
+                        </soapenv:Envelope>
+                        """);
+                using var cucm = CreateCucm(handler);
+                var outcome = await BuildingConfigurationCommand.ExecuteAsync(
+                        CreateContext(
+                                [
+                                        "buildings", "edit-allcall", "PHS", "HS-Rooms", "HighSchool",
+                                        "HighSchool", "HighSchool", "Template", "2313482160",
+                                ]),
+                        cucm);
+
+                var response = Assert.IsType<ModuleTableResponse>(
+                        Assert.IsType<ModuleCommandResult>(outcome).Response);
+                var number = Assert.Single(response.Rows, row => row.Id == "line-uuid");
+                Assert.Equal(["#9000", "Local", "All Call", ""], number.Cells);
+                Assert.Equal(
+                        [
+                                "configure", "buildings", "edit-review", "PHS", "HS-Rooms", "HighSchool",
+                                "HighSchool", "HighSchool", "Template", "2313482160", "#9000",
+                        ],
+                        number.Arguments);
+                Assert.Contains(response.Rows, row => row.Id == "none");
+        }
+
     [Fact]
     public async Task ImportRequiresReviewThenCreatesAuthoritativeLocalStore()
     {

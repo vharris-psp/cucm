@@ -49,6 +49,11 @@ internal sealed class CucmResourceQueryService(CucmService cucm)
         CancellationToken cancellationToken) =>
         MaterializeAsync(cucm.ListCallPickupGroupsAsync(cancellationToken: cancellationToken), cancellationToken);
 
+    internal Task<IReadOnlyList<CucmDirectoryNumber>> ListDirectoryNumbersAsync(
+        CancellationToken cancellationToken) =>
+        MaterializeDirectoryNumbersAsync(
+            cucm.ListDirectoryNumbersAsync(cancellationToken: cancellationToken), cancellationToken);
+
     private static async Task<IReadOnlyList<CucmNamedResource>> MaterializeAsync(
         IAsyncEnumerable<CucmNamedResource> resources,
         CancellationToken cancellationToken)
@@ -78,6 +83,34 @@ internal sealed class CucmResourceQueryService(CucmService cucm)
             }
         }
         results.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+        return results;
+    }
+
+    private static async Task<IReadOnlyList<CucmDirectoryNumber>> MaterializeDirectoryNumbersAsync(
+        IAsyncEnumerable<CucmDirectoryNumber> directoryNumbers,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<CucmDirectoryNumber>();
+        await foreach (var directoryNumber in directoryNumbers.WithCancellation(cancellationToken))
+        {
+            if (!string.IsNullOrWhiteSpace(directoryNumber.Pattern))
+            {
+                results.Add(directoryNumber);
+            }
+        }
+        results.Sort((left, right) =>
+        {
+            var patternComparison = string.Compare(
+                left.Pattern,
+                right.Pattern,
+                StringComparison.OrdinalIgnoreCase);
+            return patternComparison != 0
+                ? patternComparison
+                : string.Compare(
+                    left.RoutePartitionName,
+                    right.RoutePartitionName,
+                    StringComparison.OrdinalIgnoreCase);
+        });
         return results;
     }
 }
