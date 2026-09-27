@@ -76,6 +76,7 @@ public sealed class ClassroomPhoneWorkflowTests
                 "room.external-mask",
                 "room.external-presentation-number",
                 "room.external-presentation-name",
+                "room.enterprise-alternate-number",
                 "room.voicemail",
                 "user.dn",
                 "user.partition",
@@ -87,6 +88,7 @@ public sealed class ClassroomPhoneWorkflowTests
                 "user.external-mask",
                 "user.external-presentation-number",
                 "user.external-presentation-name",
+                "user.enterprise-alternate-number",
                 "user.voicemail",
                 "user.owner",
                 "user.dn-association",
@@ -197,6 +199,7 @@ public sealed class ClassroomPhoneWorkflowTests
 
         Assert.Equal("2313481234", plan.UserLine.ExternalPresentationNumber);
         Assert.Equal("Alice Example", plan.UserLine.ExternalPresentationName);
+        Assert.Equal("231348XXXX", plan.UserLine.EnterpriseAlternateNumberMask);
         Assert.Equal(
             "2313481234",
             Assert.Single(plan.Changes, change => change.Key == "user.external-presentation-number").Target);
@@ -215,6 +218,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 AlertingName = "Previous user",
                 ExternalPresentationNumber = "2313489999",
                 ExternalPresentationName = "Previous user",
+                EnterpriseAlternateNumberMask = initial.UserLine.EnterpriseAlternateNumberMask,
+                UseEnterpriseAlternateNumber = false,
             },
             RoomDirectoryNumber = ToDirectoryNumber(initial.RoomLine) with
             {
@@ -222,6 +227,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 AlertingName = "Previous room",
                 ExternalPresentationNumber = "2313489998",
                 ExternalPresentationName = "Previous room",
+                EnterpriseAlternateNumberMask = "2313489998",
+                UseEnterpriseAlternateNumber = false,
             },
         });
 
@@ -233,6 +240,10 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.Equal(
             "HS Room 130",
             Assert.Single(plan.Changes, change => change.Key == "room.alerting-name").Target);
+        var userEnterpriseAlternate = Assert.Single(
+            plan.Changes, change => change.Key == "user.enterprise-alternate-number");
+        Assert.Equal("<disabled>", userEnterpriseAlternate.Current);
+        Assert.Equal("Update", userEnterpriseAlternate.Action);
     }
 
     [Fact]
@@ -565,7 +576,9 @@ public sealed class ClassroomPhoneWorkflowTests
             CallForwardNotRegistered: forwarding,
             CallForwardNotRegisteredInternal: forwarding,
             ExternalPresentationNumber: "5551234",
-            ExternalPresentationName: "Alice Example");
+            ExternalPresentationName: "Alice Example",
+            EnterpriseAlternateNumberMask: "5551234",
+            UseEnterpriseAlternateNumber: true);
 
         var plan = ClassroomPhonePlanner.Create(CreateInput() with
         {
@@ -650,9 +663,9 @@ public sealed class ClassroomPhoneWorkflowTests
                 "dn-options-Room",
                 "create-User",
                 "dn-options-User",
-                "phone-line-appearances",
                 "selected-user-association",
                 "previous-owner-association",
+                "phone-line-appearances",
                 "phone-description",
                 "local-assignment",
                 "phone-configuration-refresh",
@@ -723,6 +736,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "room-line-4-dn-options",
                 "user-line-2-create-dn",
                 "user-line-2-dn-options",
+                "selected-user-association",
+                "previous-owner-association",
             ],
             exception.CompletedOperations);
         Assert.Equal(
@@ -732,6 +747,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "dn-options-Room",
                 "create-User",
                 "dn-options-User",
+                "selected-user-association",
+                "previous-owner-association",
                 "phone-line-appearances",
             ],
             writer.Calls);
@@ -872,7 +889,9 @@ public sealed class ClassroomPhoneWorkflowTests
             new CucmCallForwardSettings(),
             line.AlertingName,
             ExternalPresentationNumber: line.ExternalPresentationNumber,
-            ExternalPresentationName: line.ExternalPresentationName);
+            ExternalPresentationName: line.ExternalPresentationName,
+            EnterpriseAlternateNumberMask: line.EnterpriseAlternateNumberMask,
+            UseEnterpriseAlternateNumber: line.EnterpriseAlternateNumberMask is not null);
 
     private sealed class RecordingWriter(string? failAt = null) : IClassroomPhoneWriter
     {

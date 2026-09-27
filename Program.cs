@@ -1851,7 +1851,43 @@ static async ValueTask<ModuleCommandOutcome> PhonesAsync(ModuleContext context)
                         "edit",
                         ["Edit", "Update description, device pool, and owner"],
                         ["phones", "edit", phoneName]),
+                    new ModuleTableRow(
+                        "apply-configuration",
+                        ["Apply configuration", "Soft refresh pending CUCM configuration on the phone"],
+                        ["phones", "apply-configuration", phoneName]),
+                    new ModuleTableRow(
+                        "reset",
+                        ["Reset phone", "Hard reset the phone and reload its CUCM configuration"],
+                        ["phones", "reset-review", phoneName]),
                 ]));
+        }
+        if (context.Arguments is ["apply-configuration", var phoneNameToRefresh])
+        {
+            _ = await RequirePhoneAsync(cucm, phoneNameToRefresh, context.CancellationToken);
+            await cucm.ApplyPhoneConfigurationAsync(phoneNameToRefresh, context.CancellationToken);
+            return ModuleCommandResult.Ok(
+                $"Requested a configuration refresh for '{phoneNameToRefresh}'.");
+        }
+        if (context.Arguments is ["reset-review", var phoneNameToReset])
+        {
+            _ = await RequirePhoneAsync(cucm, phoneNameToReset, context.CancellationToken);
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Reset CUCM phone: {phoneNameToReset}",
+                ["PHONE", "ACTION"],
+                [
+                    new ModuleTableRow(
+                        "reset",
+                        [phoneNameToReset, "Hard reset and reload configuration"],
+                        ["phones", "reset", phoneNameToReset]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+        }
+        if (context.Arguments is ["reset", var phoneNameForHardReset])
+        {
+            _ = await RequirePhoneAsync(cucm, phoneNameForHardReset, context.CancellationToken);
+            await cucm.HardResetPhoneAsync(phoneNameForHardReset, context.CancellationToken);
+            return ModuleCommandResult.Ok(
+                $"Requested a hard reset for '{phoneNameForHardReset}'.");
         }
         if (context.Arguments is ["template", var templatePhoneName])
         {

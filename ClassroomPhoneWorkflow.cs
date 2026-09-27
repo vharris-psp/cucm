@@ -116,6 +116,7 @@ internal sealed record ClassroomLinePlan(
     string? ExternalPhoneNumberMask,
     string? ExternalPresentationNumber,
     string? ExternalPresentationName,
+    string? EnterpriseAlternateNumberMask,
     string VoiceMailProfileName,
     string? OwnerUserId,
     bool CreateDirectoryNumber,
@@ -583,6 +584,7 @@ internal static class ClassroomPhonePlanner
             externalMask,
             externalPresentationNumber,
             externalPresentationName,
+            externalMask,
             voiceMailProfileName,
             ownerUserId,
             directoryNumber is null,
@@ -595,6 +597,9 @@ internal static class ClassroomPhonePlanner
                 externalPresentationNumber is not null &&
                     (!EqualsValue(directoryNumber.ExternalPresentationNumber, externalPresentationNumber) ||
                      !EqualsValue(directoryNumber.ExternalPresentationName, externalPresentationName)) ||
+                externalMask is not null &&
+                    (!EqualsValue(directoryNumber.EnterpriseAlternateNumberMask, externalMask) ||
+                     directoryNumber.UseEnterpriseAlternateNumber != true) ||
                 needsForwardPolicyUpdate,
             !EqualsValue(currentLine?.Display, display) || !EqualsValue(currentLine?.DisplayAscii, display),
             !EqualsValue(currentLine?.Label, label),
@@ -668,6 +673,13 @@ internal static class ClassroomPhonePlanner
                 roomLine.ExternalPresentationName,
                 roomLine.CreateDirectoryNumber,
                 includeRoom),
+            EnterpriseAlternateChange(
+                "room.enterprise-alternate-number",
+                "Room enterprise alternate number mask",
+                input.RoomDirectoryNumber,
+                roomLine.EnterpriseAlternateNumberMask,
+                roomLine.CreateDirectoryNumber,
+                includeRoom),
             Change("room.voicemail", "Room voicemail profile", input.RoomDirectoryNumber?.VoiceMailProfileName,
                 roomLine.VoiceMailProfileName, "Update", includeRoom),
             Change("user.dn", $"User line {userLine.Index} DN", userCurrent?.Pattern,
@@ -700,6 +712,13 @@ internal static class ClassroomPhonePlanner
                 "User external presentation name",
                 input.UserDirectoryNumber?.ExternalPresentationName,
                 userLine.ExternalPresentationName,
+                userLine.CreateDirectoryNumber,
+                includeUser),
+            EnterpriseAlternateChange(
+                "user.enterprise-alternate-number",
+                "User enterprise alternate number mask",
+                input.UserDirectoryNumber,
+                userLine.EnterpriseAlternateNumberMask,
                 userLine.CreateDirectoryNumber,
                 includeUser),
             Change("user.voicemail", "User voicemail profile", input.UserDirectoryNumber?.VoiceMailProfileName,
@@ -772,6 +791,33 @@ internal static class ClassroomPhonePlanner
                 return new ClassroomPhoneChange(key, field, Display(current), "<Not configured>", "Not managed");
             }
             return Change(key, field, current, target, createDirectoryNumber ? "Create value" : "Update");
+        }
+
+        static ClassroomPhoneChange EnterpriseAlternateChange(
+            string key,
+            string field,
+            CucmDirectoryNumber? directoryNumber,
+            string? target,
+            bool createDirectoryNumber,
+            bool included)
+        {
+            var current = directoryNumber?.UseEnterpriseAlternateNumber == true
+                ? Display(directoryNumber.EnterpriseAlternateNumberMask)
+                : "<disabled>";
+            if (!included)
+            {
+                return new ClassroomPhoneChange(key, field, current, "<Not applied>", "Skip (excluded)");
+            }
+            if (target is null)
+            {
+                return new ClassroomPhoneChange(key, field, current, "<Not configured>", "Not managed");
+            }
+            return new ClassroomPhoneChange(
+                key,
+                field,
+                current,
+                target,
+                EqualsValue(current, target) ? "No change" : createDirectoryNumber ? "Create value" : "Update");
         }
 
         static string AllCallAction(ClassroomSpeedDialPlan speedDial)
@@ -1087,14 +1133,6 @@ internal static class ClassroomPhoneExecutor
         await ExecuteDirectoryNumberOptionsAsync(plan.RoomLine, writer, completed, cancellationToken);
         await ExecuteLineCreationAsync(plan.UserLine, writer, completed, cancellationToken);
         await ExecuteDirectoryNumberOptionsAsync(plan.UserLine, writer, completed, cancellationToken);
-        if (NeedsLineAppearanceUpdate(plan.RoomLine) || NeedsLineAppearanceUpdate(plan.UserLine))
-        {
-            await ExecuteAsync(
-                "phone-line-appearances",
-                ct => writer.UpdateLineAppearancesAsync(plan, ct),
-                completed,
-                cancellationToken);
-        }
         if (plan.AddUserAssociation)
         {
             await ExecuteAsync(
@@ -1111,6 +1149,14 @@ internal static class ClassroomPhoneExecutor
                 completed,
                 cancellationToken);
         }
+            if (NeedsLineAppearanceUpdate(plan.RoomLine) || NeedsLineAppearanceUpdate(plan.UserLine))
+            {
+                await ExecuteAsync(
+                "phone-line-appearances",
+                ct => writer.UpdateLineAppearancesAsync(plan, ct),
+                completed,
+                cancellationToken);
+            }
         if (plan.UpdateDescription)
         {
             await ExecuteAsync(
@@ -1303,7 +1349,8 @@ internal sealed class CucmClassroomPhoneWriter(
                 CallingSearchSpaceActivationPolicy: line.CallingSearchSpaceActivationPolicy,
                 ClearCallPickupGroup: line.ClearCallPickupGroup,
                 ExternalPresentationNumber: line.ExternalPresentationNumber,
-                ExternalPresentationName: line.ExternalPresentationName),
+                ExternalPresentationName: line.ExternalPresentationName,
+                EnterpriseAlternateNumberMask: line.EnterpriseAlternateNumberMask),
             cancellationToken);
     }
 
