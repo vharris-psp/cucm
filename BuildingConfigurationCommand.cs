@@ -86,6 +86,17 @@ internal static class BuildingConfigurationCommand
                 legacyConfiguration,
                 context.CancellationToken);
             var profile = RequireProfile(profiles, selectedCode);
+            IReadOnlyList<string>? allCallArguments =
+                profile.DevicePoolName is not null &&
+                profile.LocationName is not null &&
+                profile.PhoneTemplateName is not null
+                    ? [
+                        "configure", "buildings", "edit-allcall", selectedCode,
+                        profile.RoutePartitionName, profile.DevicePoolName, profile.LocationName,
+                        string.Join(",", profile.DevicePoolNames), profile.PhoneTemplateName,
+                        profile.RoomExternalPhoneNumberMask ?? string.Empty,
+                    ]
+                    : null;
             var rows = new List<ModuleTableRow>
             {
                 new("code", ["Code", selectedCode]),
@@ -100,7 +111,10 @@ internal static class BuildingConfigurationCommand
                 new(
                     "room-mask",
                     ["Room external phone number mask", profile.RoomExternalPhoneNumberMask ?? "<not configured>"]),
-                new("all-call", ["All Call number", profile.AllCallNumber ?? "<not configured>"]),
+                new(
+                    "all-call",
+                    ["All Call number", profile.AllCallNumber ?? "<not configured>"],
+                    allCallArguments),
                 new(
                     "edit",
                     ["Edit", "Select live CUCM resources and review the complete profile"],
