@@ -325,6 +325,61 @@ public sealed class ClassroomPhoneWorkflowTests
     }
 
     [Fact]
+    public void UserDnNoAnswerForwardsToVoiceMailWithoutChangingOtherForwardTargets()
+    {
+        var plan = ClassroomPhonePlanner.Create(CreateInput() with
+        {
+            UserForwardCallingSearchSpaceName = "Subscribe",
+            UserNoAnswerRingDurationSeconds = 20,
+        });
+
+        Assert.True(plan.UserLine.ForwardNoAnswerToVoiceMail);
+        Assert.False(plan.RoomLine.ForwardNoAnswerToVoiceMail);
+
+        var userForwards = CucmClassroomPhoneWriter.BuildForwardSettings(plan.UserLine);
+        Assert.False(userForwards.All!.ForwardToVoiceMail);
+        Assert.False(userForwards.Busy!.ForwardToVoiceMail);
+        Assert.True(userForwards.NoAnswer!.ForwardToVoiceMail);
+        Assert.True(userForwards.NoAnswerInternal!.ForwardToVoiceMail);
+        Assert.Equal(20, userForwards.NoAnswer.NoAnswerRingDurationSeconds);
+        Assert.False(userForwards.NoCoverage!.ForwardToVoiceMail);
+        Assert.False(userForwards.NotRegistered!.ForwardToVoiceMail);
+    }
+
+    [Fact]
+    public void PlannerTreatsUserDnNoAnswerVoiceMailPolicyAsConverged()
+    {
+        var forwarding = new CucmCallForwardSettings(
+            ForwardToVoiceMail: false, CallingSearchSpaceName: "Subscribe");
+        var noAnswer = forwarding with
+        {
+            ForwardToVoiceMail = true,
+            NoAnswerRingDurationSeconds = 20,
+        };
+        var userDirectoryNumber = new CucmDirectoryNumber(
+            "user-dn-uuid", "1234", "User DID 1234", null, "Users-PT", "Users-CSS", "Users-VM",
+            forwarding, "Alice Example",
+            CallForwardBusy: forwarding,
+            CallForwardBusyInternal: forwarding,
+            CallForwardNoAnswer: noAnswer,
+            CallForwardNoAnswerInternal: noAnswer,
+            CallForwardNoCoverage: forwarding,
+            CallForwardNoCoverageInternal: forwarding,
+            CallForwardOnFailure: forwarding,
+            CallForwardNotRegistered: forwarding,
+            CallForwardNotRegisteredInternal: forwarding);
+
+        var plan = ClassroomPhonePlanner.Create(CreateInput() with
+        {
+            UserDirectoryNumber = userDirectoryNumber,
+            UserForwardCallingSearchSpaceName = "Subscribe",
+            UserNoAnswerRingDurationSeconds = 20,
+        });
+
+        Assert.False(plan.UserLine.UpdateDirectoryNumber);
+    }
+
+    [Fact]
     public void PartialScopeDoesNotRequireTheResultingPhoneToBeFullyCompliant()
     {
         // With an empty phone and only the room slot included, the user slot stays unfilled —

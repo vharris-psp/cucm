@@ -125,6 +125,7 @@ internal sealed record ClassroomLinePlan(
     string? ForwardCallingSearchSpaceName = null,
     string? CallingSearchSpaceActivationPolicy = null,
     bool ClearCallPickupGroup = false,
+    bool ForwardNoAnswerToVoiceMail = false,
     int? NoAnswerRingDurationSeconds = null);
 
 internal sealed record ClassroomSpeedDialPlan(int Index, string Destination, string Label, bool Update);
@@ -331,6 +332,7 @@ internal static class ClassroomPhonePlanner
             forwardCallingSearchSpaceName: Normalize(input.UserForwardCallingSearchSpaceName),
             callingSearchSpaceActivationPolicy: Normalize(input.UserCallingSearchSpaceActivationPolicy),
             clearCallPickupGroup: true,
+            forwardNoAnswerToVoiceMail: true,
             noAnswerRingDurationSeconds: input.UserNoAnswerRingDurationSeconds);
         if (!includeRoom)
         {
@@ -499,6 +501,7 @@ internal static class ClassroomPhonePlanner
         string? forwardCallingSearchSpaceName = null,
         string? callingSearchSpaceActivationPolicy = null,
         bool clearCallPickupGroup = false,
+        bool forwardNoAnswerToVoiceMail = false,
         int? noAnswerRingDurationSeconds = null)
     {
         string Resolve(string? value, string field) => Normalize(
@@ -533,7 +536,7 @@ internal static class ClassroomPhonePlanner
             ownerUserId is not null && !EqualsValue(phone.OwnerUserName, ownerUserId);
         var needsForwardPolicyUpdate = NeedsForwardPolicyUpdate(
             directoryNumber, forwardCallingSearchSpaceName, callingSearchSpaceActivationPolicy,
-            clearCallPickupGroup, noAnswerRingDurationSeconds);
+            clearCallPickupGroup, forwardNoAnswerToVoiceMail, noAnswerRingDurationSeconds);
 
         return new ClassroomLinePlan(
             kind,
@@ -560,6 +563,7 @@ internal static class ClassroomPhonePlanner
             forwardCallingSearchSpaceName,
             callingSearchSpaceActivationPolicy,
             clearCallPickupGroup,
+            forwardNoAnswerToVoiceMail,
             noAnswerRingDurationSeconds);
     }
 
@@ -803,6 +807,7 @@ internal static class ClassroomPhonePlanner
         string? forwardCallingSearchSpaceName,
         string? callingSearchSpaceActivationPolicy,
         bool clearCallPickupGroup,
+        bool forwardNoAnswerToVoiceMail,
         int? noAnswerRingDurationSeconds)
     {
         if (forwardCallingSearchSpaceName is null &&
@@ -828,16 +833,21 @@ internal static class ClassroomPhonePlanner
         {
             return false;
         }
-        bool Mismatched(CucmCallForwardSettings? settings, int? expectedDuration = null) =>
+        bool Mismatched(
+            CucmCallForwardSettings? settings,
+            bool expectedForwardToVoiceMail = false,
+            int? expectedDuration = null) =>
             settings is null ||
-            settings.ForwardToVoiceMail ||
+            settings.ForwardToVoiceMail != expectedForwardToVoiceMail ||
             !EqualsValue(settings.CallingSearchSpaceName, forwardCallingSearchSpaceName) ||
             (expectedDuration is not null && settings.NoAnswerRingDurationSeconds != expectedDuration);
         return Mismatched(directoryNumber.CallForwardAll) ||
             Mismatched(directoryNumber.CallForwardBusy) ||
             Mismatched(directoryNumber.CallForwardBusyInternal) ||
-            Mismatched(directoryNumber.CallForwardNoAnswer, noAnswerRingDurationSeconds) ||
-            Mismatched(directoryNumber.CallForwardNoAnswerInternal, noAnswerRingDurationSeconds) ||
+            Mismatched(directoryNumber.CallForwardNoAnswer, forwardNoAnswerToVoiceMail,
+                noAnswerRingDurationSeconds) ||
+            Mismatched(directoryNumber.CallForwardNoAnswerInternal, forwardNoAnswerToVoiceMail,
+                noAnswerRingDurationSeconds) ||
             Mismatched(directoryNumber.CallForwardNoCoverage) ||
             Mismatched(directoryNumber.CallForwardNoCoverageInternal) ||
             Mismatched(directoryNumber.CallForwardOnFailure) ||
@@ -1201,10 +1211,10 @@ internal sealed class CucmClassroomPhoneWriter(
             cancellationToken);
     }
 
-    // Applies the same configured CSS (never Voice Mail) to every forward variant; only the two
-    // "No Answer" variants also carry the configured ring duration. "All" is handled separately by
-    // the caller since 'addLine' can't set it directly (a follow-up 'updateLine' is required).
-    private static (
+    // Applies the configured CSS to every forward variant. User-DN "No Answer" variants target
+    // voicemail and carry the configured ring duration; all other variants remain non-voicemail.
+    // "All" is handled separately since 'addLine' can't set it directly.
+    internal static (
         CucmCallForwardSettings? All,
         CucmCallForwardSettings? Busy,
         CucmCallForwardSettings? BusyInternal,
@@ -1221,7 +1231,11 @@ internal sealed class CucmClassroomPhoneWriter(
             return (null, null, null, null, null, null, null, null, null, null);
         }
         var settings = new CucmCallForwardSettings(ForwardToVoiceMail: false, CallingSearchSpaceName: css);
-        var noAnswerSettings = settings with { NoAnswerRingDurationSeconds = line.NoAnswerRingDurationSeconds };
+        var noAnswerSettings = settings with
+        {
+            ForwardToVoiceMail = line.ForwardNoAnswerToVoiceMail,
+            NoAnswerRingDurationSeconds = line.NoAnswerRingDurationSeconds,
+        };
         return (settings, settings, settings, noAnswerSettings, noAnswerSettings, settings, settings, settings,
             settings, settings);
     }

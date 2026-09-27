@@ -136,7 +136,11 @@ public sealed class PhoneConfigurationChecksTests
         var (phone, owner, policies, buildings) = CreateClassroomFixture();
         var forwardSettings = new VSharp.Cucm.Models.CucmCallForwardSettings(
             ForwardToVoiceMail: false, CallingSearchSpaceName: "Subscribe");
-        var noAnswerSettings = forwardSettings with { NoAnswerRingDurationSeconds = 20 };
+        var noAnswerSettings = forwardSettings with
+        {
+            ForwardToVoiceMail = true,
+            NoAnswerRingDurationSeconds = 20,
+        };
         var userDn = new VSharp.Cucm.Models.CucmDirectoryNumber(
             "dn-uuid", "2112", null, null, "AllPhones", null, "VM-Profile", forwardSettings,
             CallForwardBusy: forwardSettings,

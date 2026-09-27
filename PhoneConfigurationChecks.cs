@@ -931,10 +931,12 @@ internal static class PhoneConfigurationChecks
                 expectedForwardCallingSearchSpaceName, null));
             results.AddRange(EvaluateCallForward(
                 "Forward No Answer", userDirectoryNumber?.CallForwardNoAnswer,
-                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds));
+                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds,
+                expectedForwardToVoiceMail: true));
             results.AddRange(EvaluateCallForward(
                 "Forward No Answer Internal", userDirectoryNumber?.CallForwardNoAnswerInternal,
-                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds));
+                expectedForwardCallingSearchSpaceName, expectedNoAnswerRingDurationSeconds,
+                expectedForwardToVoiceMail: true));
             results.AddRange(EvaluateCallForward(
                 "Forward No Coverage", userDirectoryNumber?.CallForwardNoCoverage,
                 expectedForwardCallingSearchSpaceName, null));
@@ -955,13 +957,14 @@ internal static class PhoneConfigurationChecks
         return results;
     }
 
-    // Verifies a single call-forward variant forwards (not to voicemail) via the configured CSS,
-    // and - for the two "No Answer" variants - carries the configured ring duration.
+    // Verifies a single call-forward variant uses the configured CSS and expected destination;
+    // the two "No Answer" variants also carry the configured ring duration.
     private static IReadOnlyList<PhoneCheckResult> EvaluateCallForward(
         string label,
         CucmCallForwardSettings? settings,
         string expectedCallingSearchSpaceName,
-        int? expectedRingDurationSeconds)
+        int? expectedRingDurationSeconds,
+        bool expectedForwardToVoiceMail = false)
     {
         var results = new List<PhoneCheckResult>
         {
@@ -972,14 +975,18 @@ internal static class PhoneConfigurationChecks
                 $"{label} calling search space matches the configured default."),
         };
         var forwardsToVoiceMail = settings?.ForwardToVoiceMail ?? false;
+        var expectedTarget = expectedForwardToVoiceMail ? "Forwarded to voicemail" : "Forwarded via CSS";
+        var actualTarget = forwardsToVoiceMail ? "Forwarded to voicemail" : "Forwarded via CSS";
+        var targetMatches = forwardsToVoiceMail == expectedForwardToVoiceMail;
         results.Add(new PhoneCheckResult(
             $"User DN {label} target",
-            "Not forwarded to voicemail",
-            forwardsToVoiceMail ? "Forwarded to voicemail" : "Forwarded via CSS",
-            forwardsToVoiceMail ? PhoneCheckStatus.Failed : PhoneCheckStatus.Passed,
-            forwardsToVoiceMail
-                ? $"{label} is forwarding to voicemail instead of the configured calling search space."
-                : $"{label} is not forwarding to voicemail."));
+            expectedTarget,
+            actualTarget,
+            targetMatches ? PhoneCheckStatus.Passed : PhoneCheckStatus.Failed,
+            targetMatches
+                ? $"{label} targets {expectedTarget.ToLowerInvariant()}."
+                : $"{label} targets {actualTarget.ToLowerInvariant()}, not " +
+                    $"{expectedTarget.ToLowerInvariant()}."));
         if (expectedRingDurationSeconds is not null)
         {
             results.Add(new PhoneCheckResult(
