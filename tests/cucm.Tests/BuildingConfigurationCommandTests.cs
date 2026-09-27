@@ -31,6 +31,50 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task LocationRowRoutesToDedicatedSelector()
+    {
+        using var cucm = CreateCucm();
+        var outcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(["buildings", "select", "PHS"]),
+            cucm);
+
+        var response = Assert.IsType<ModuleTableResponse>(
+            Assert.IsType<ModuleCommandResult>(outcome).Response);
+        Assert.Equal(
+            ["configure", "buildings", "select-location", "PHS"],
+            Assert.Single(response.Rows, row => row.Id == "location").Arguments);
+    }
+
+    [Fact]
+    public async Task LocationChangeRequiresReviewAndPreservesOtherProfileValues()
+    {
+        using var cucm = CreateCucm();
+        var reviewOutcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(["buildings", "review-location", "PHS", "PHS-New"]),
+            cucm);
+
+        var review = Assert.IsType<ModuleTableResponse>(
+            Assert.IsType<ModuleCommandResult>(reviewOutcome).Response);
+        Assert.Equal(ModuleTableSubmitMode.Save, review.SubmitMode);
+        Assert.Equal(
+            ["configure", "buildings", "save-location", "PHS", "PHS-New"],
+            Assert.Single(review.Rows, row => row.Id == "save").Arguments);
+        Assert.False(new BuildingProfileStore(_directory).Exists);
+
+        var saveOutcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(["buildings", "save-location", "PHS", "PHS-New"]),
+            cucm);
+
+        Assert.Equal(0, Assert.IsType<ModuleCommandResult>(saveOutcome).ExitCode);
+        var stored = Assert.Single(await new BuildingProfileStore(_directory).LoadAsync()).Value;
+        Assert.Equal("PHS-New", stored.LocationName);
+        Assert.Equal("HS-Rooms", stored.RoutePartitionName);
+        Assert.Equal("HighSchool", stored.DevicePoolName);
+        Assert.Equal(["HighSchool", "HighSchool_SRST"], stored.DevicePoolNames);
+        Assert.Equal("Standard 7841 SIP 1DN-1SdBLF-2DN", stored.PhoneTemplateName);
+    }
+
+    [Fact]
     public async Task ImportRequiresReviewThenCreatesAuthoritativeLocalStore()
     {
         using var cucm = CreateCucm();

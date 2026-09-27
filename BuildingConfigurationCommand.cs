@@ -91,7 +91,10 @@ internal static class BuildingConfigurationCommand
                 new("code", ["Code", selectedCode]),
                 new("partition", ["Room route partition", profile.RoutePartitionName]),
                 new("target-pool", ["Classroom target device pool", profile.DevicePoolName ?? "<not configured>"]),
-                new("location", ["Phone location", profile.LocationName ?? "<not configured>"]),
+                new(
+                    "location",
+                    ["Phone location", profile.LocationName ?? "<not configured>"],
+                    ["configure", "buildings", "select-location", selectedCode]),
                 new("recognized-pools", ["Recognized device pools", string.Join(", ", profile.DevicePoolNames)]),
                 new("template", ["Phone button template", profile.PhoneTemplateName ?? "<phone default>"]),
                 new(
@@ -147,6 +150,63 @@ internal static class BuildingConfigurationCommand
                 resourceQueries,
                 NormalizeCode(editCode),
                 context.CancellationToken));
+        }
+
+        if (context.Arguments is ["buildings", "select-location", var selectLocationCode])
+        {
+            var code = NormalizeCode(selectLocationCode);
+            var profiles = await store.LoadEffectiveAsync(
+                legacyConfiguration,
+                context.CancellationToken);
+            RequireProfile(profiles, code);
+            var rows = new List<ModuleTableRow>();
+            foreach (var location in await resourceQueries.ListLocationsAsync(context.CancellationToken))
+            {
+                rows.Add(new ModuleTableRow(
+                    location.Uuid ?? $"location:{location.Name}",
+                    [location.Name],
+                    ["configure", "buildings", "review-location", code, location.Name]));
+            }
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Phone location for {code}",
+                ["NAME"],
+                rows));
+        }
+
+        if (context.Arguments is
+            ["buildings", "review-location", var reviewLocationCode, var reviewLocationName])
+        {
+            var code = NormalizeCode(reviewLocationCode);
+            var profiles = await store.LoadEffectiveAsync(
+                legacyConfiguration,
+                context.CancellationToken);
+            var profile = RequireProfile(profiles, code);
+            return ModuleCommandResult.Render(new ModuleTableResponse(
+                $"Review phone location for {code}",
+                ["BUILDING", "CURRENT LOCATION", "NEW LOCATION"],
+                [
+                    new ModuleTableRow(
+                        "save",
+                        [code, profile.LocationName ?? "<not configured>", reviewLocationName],
+                        ["configure", "buildings", "save-location", code, reviewLocationName]),
+                ],
+                SubmitMode: ModuleTableSubmitMode.Save));
+        }
+
+        if (context.Arguments is
+            ["buildings", "save-location", var saveLocationCode, var saveLocationName])
+        {
+            var code = NormalizeCode(saveLocationCode);
+            var profiles = (await store.LoadEffectiveAsync(
+                legacyConfiguration,
+                context.CancellationToken)).ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.OrdinalIgnoreCase);
+            var profile = RequireProfile(profiles, code);
+            profiles[code] = profile with { LocationName = saveLocationName.Trim() };
+            await store.ReplaceAsync(profiles, context.CancellationToken);
+            return ModuleCommandResult.Ok($"Saved phone location for building '{code}'.");
         }
 
         if (context.Arguments is ["buildings", "edit-device-pool", var poolCode, var partitionName])
@@ -384,6 +444,9 @@ internal static class BuildingConfigurationCommand
         ["buildings", "select", var code] => $"Loading building profile '{code}'",
         ["buildings", "add-code", ..] or ["buildings", "edit-partition", ..] =>
             "Loading CUCM route partitions",
+        ["buildings", "select-location", ..] => "Loading CUCM phone locations",
+        ["buildings", "review-location", var code, ..] =>
+            $"Loading phone location review for '{code}'",
         ["buildings", "edit-device-pool", ..] => "Loading CUCM device pools",
         ["buildings", "edit-location", ..] => "Loading CUCM phone locations",
         ["buildings", "edit-recognized", ..] => "Loading recognized device pools",
