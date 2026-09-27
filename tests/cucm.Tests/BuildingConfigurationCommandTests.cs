@@ -6,7 +6,7 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     private const string LegacyConfiguration =
         "{\"PHS\":{\"routePartitionName\":\"HS-Rooms\",\"devicePoolName\":\"HighSchool\"," +
         "\"devicePools\":[\"HighSchool\",\"HighSchool_SRST\"]," +
-        "\"phoneTemplateName\":\"Standard 7841 SIP 1DN-1SdBLF-2DN\"}}";
+        "\"phoneTemplateName\":\"Standard 7841 SIP 1DN-1SdBLF-2DN\",\"locationName\":\"PHS\"}}";
 
     private readonly string _directory = Path.Combine(
         Path.GetTempPath(),
@@ -23,7 +23,7 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
         var result = Assert.IsType<ModuleCommandResult>(outcome);
         var response = Assert.IsType<ModuleTableResponse>(result.Response);
         var profile = Assert.Single(response.Rows, row => row.Id == "PHS");
-        Assert.Equal("Legacy module setting", profile.Cells[5]);
+        Assert.Equal("Legacy module setting", profile.Cells[6]);
         Assert.Equal(["configure", "buildings", "select", "PHS"], profile.Arguments);
         Assert.Contains(response.Rows, row => row.Id == "add");
         Assert.Contains(response.Rows, row => row.Id == "import");
@@ -62,10 +62,19 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     public void LoadingStatusDescribesOptionalBuildingValue(string route, string expected)
     {
         var arguments = route == "edit-mask"
-            ? new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "HighSchool", "Template" }
-            : new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "HighSchool", "Template", "231347XXXX" };
+            ? new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "PHS", "HighSchool", "Template" }
+            : new[] { "buildings", route, "PHS", "HS-Rooms", "HighSchool", "PHS", "HighSchool", "Template", "231347XXXX" };
 
         Assert.Equal(expected, BuildingConfigurationCommand.LoadingStatus(arguments));
+    }
+
+    [Fact]
+    public void LoadingStatusDescribesLocationSelector()
+    {
+        Assert.Equal(
+            "Loading CUCM phone locations",
+            BuildingConfigurationCommand.LoadingStatus(
+                ["buildings", "edit-location", "PHS", "HS-Rooms", "HighSchool"]));
     }
 
     [Theory]

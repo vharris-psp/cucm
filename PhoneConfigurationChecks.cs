@@ -39,7 +39,8 @@ internal sealed record BuildingPattern(
     string? PhoneTemplateName = null,
     string? DevicePoolName = null,
     string? RoomExternalPhoneNumberMask = null,
-    string? AllCallNumber = null);
+    string? AllCallNumber = null,
+    string? LocationName = null);
 
 internal enum TemplateComplianceSlotKind
 {
@@ -275,7 +276,8 @@ internal static class PhoneConfigurationChecks
                     ReadString(property.Value, "phoneTemplateName"),
                     devicePoolName,
                     ReadString(property.Value, "roomExternalPhoneNumberMask"),
-                    ReadString(property.Value, "allCallNumber"));
+                    ReadString(property.Value, "allCallNumber"),
+                    ReadString(property.Value, "locationName"));
             }
             return patterns;
         }
@@ -736,6 +738,24 @@ internal static class PhoneConfigurationChecks
             buildingCode,
             PhoneCheckStatus.Passed,
             $"Resolved from device pool '{phone.DevicePoolName}'."));
+
+        if (string.IsNullOrWhiteSpace(buildingPattern.LocationName))
+        {
+            results.Add(new PhoneCheckResult(
+                "Phone location",
+                "A location configured for the building",
+                Display(phone.LocationName),
+                PhoneCheckStatus.Unresolved,
+                $"Building '{buildingCode}' has no phone location configured."));
+        }
+        else
+        {
+            results.Add(EqualsCheck(
+                "Phone location",
+                buildingPattern.LocationName,
+                phone.LocationName,
+                $"Building {buildingCode} expects phone location '{buildingPattern.LocationName}'."));
+        }
 
         var roomLine = phone.Lines.FirstOrDefault(line => line.Index == roomLineIndex);
         if (roomLine is null || string.IsNullOrWhiteSpace(roomLine.Pattern))

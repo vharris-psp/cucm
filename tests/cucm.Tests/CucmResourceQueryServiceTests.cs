@@ -53,6 +53,23 @@ public sealed class CucmResourceQueryServiceTests
         Assert.Equal("High school", group.Description);
     }
 
+    [Fact]
+    public async Task ListLocationsAsyncReturnsSortedLocations()
+    {
+        var handler = new FakeHandler(
+            ListResponse(
+                "listLocationResponse",
+                "location",
+                """<location uuid="l1"><name>PMS</name></location>""",
+                """<location uuid="l2"><name>PHS</name></location>"""));
+        using var cucm = CreateService(handler);
+        var service = new CucmResourceQueryService(cucm);
+
+        var results = await service.ListLocationsAsync(CancellationToken.None);
+
+        Assert.Equal(["PHS", "PMS"], results.Select(resource => resource.Name));
+    }
+
     private static string ListResponse(string responseElement, string itemElement, params string[] items) =>
         $"""
         <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">

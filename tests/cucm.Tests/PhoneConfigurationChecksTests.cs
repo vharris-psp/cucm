@@ -10,7 +10,8 @@ public sealed class PhoneConfigurationChecksTests
                 "routePartitionName": "Rooms-PT",
                 "devicePoolName": "High School Classrooms",
                 "devicePools": ["High School"],
-                "phoneTemplateName": "HS-UserRoom"
+                "phoneTemplateName": "HS-UserRoom",
+                "locationName": "PHS"
               }
             }
             """);
@@ -20,6 +21,7 @@ public sealed class PhoneConfigurationChecksTests
         Assert.Equal("High School Classrooms", building.DevicePoolName);
         Assert.Equal(["High School", "High School Classrooms"], building.DevicePoolNames);
         Assert.Equal("HS-UserRoom", building.PhoneTemplateName);
+        Assert.Equal("PHS", building.LocationName);
     }
 
     [Fact]
@@ -84,7 +86,8 @@ public sealed class PhoneConfigurationChecksTests
                     3, "130", "HS-Rooms", "PHS Room 130", "PHS Room 130", "PHS Room 130"),
             ],
             "HighSchool",
-            "Standard 7841 SIP 1DN-1SdBLF-2DN");
+            "Standard 7841 SIP 1DN-1SdBLF-2DN",
+            LocationName: "PHS");
         var owner = new VSharp.Cucm.Models.CucmUser(
             "user-uuid",
             "vharris",
@@ -112,7 +115,8 @@ public sealed class PhoneConfigurationChecksTests
                 "HS-Rooms",
                 ["HighSchool"],
                 "Standard 7841 SIP 1DN-1SdBLF-2DN",
-                "HighSchool"),
+                "HighSchool",
+                LocationName: "PHS"),
         };
 
         var results = PhoneConfigurationChecks.EvaluateClassroom(
@@ -121,13 +125,14 @@ public sealed class PhoneConfigurationChecksTests
             policies,
             buildings);
 
-        Assert.Equal(4, results.Count);
+        Assert.Equal(5, results.Count);
         Assert.All(results, result => Assert.Equal(PhoneCheckStatus.Passed, result.Status));
         Assert.Equal("2112", results[0].Expected);
         Assert.Equal("2112", results[0].Actual);
         Assert.Equal("PHS", results[1].Actual);
-        Assert.Equal("130", results[2].Actual);
-        Assert.Equal("HS-Rooms", results[3].Actual);
+        Assert.Equal("PHS", results[2].Actual);
+        Assert.Equal("130", results[3].Actual);
+        Assert.Equal("HS-Rooms", results[4].Actual);
     }
 
     [Fact]
@@ -223,7 +228,8 @@ public sealed class PhoneConfigurationChecksTests
                     3, "130", "HS-Rooms", "PHS Room 130", "PHS Room 130", "PHS Room 130"),
             ],
             "HighSchool",
-            "Standard 7841 SIP 1DN-1SdBLF-2DN");
+            "Standard 7841 SIP 1DN-1SdBLF-2DN",
+            LocationName: "PHS");
         var owner = new VSharp.Cucm.Models.CucmUser(
             "user-uuid",
             "vharris",
@@ -251,7 +257,8 @@ public sealed class PhoneConfigurationChecksTests
                 "HS-Rooms",
                 ["HighSchool"],
                 "Standard 7841 SIP 1DN-1SdBLF-2DN",
-                "HighSchool"),
+                "HighSchool",
+                LocationName: "PHS"),
         };
         return (phone, owner, policies, buildings);
     }

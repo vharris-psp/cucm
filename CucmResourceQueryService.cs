@@ -15,6 +15,10 @@ internal sealed class CucmResourceQueryService(CucmService cucm)
         CancellationToken cancellationToken) =>
         MaterializeAsync(cucm.ListDevicePoolsAsync(cancellationToken: cancellationToken), cancellationToken);
 
+    internal Task<IReadOnlyList<CucmNamedResource>> ListLocationsAsync(
+        CancellationToken cancellationToken) =>
+        MaterializeAsync(cucm.ListLocationsAsync(cancellationToken: cancellationToken), cancellationToken);
+
     internal Task<IReadOnlyList<CucmNamedResource>> ListPhoneButtonTemplatesAsync(
         CancellationToken cancellationToken) =>
         MaterializeAsync(

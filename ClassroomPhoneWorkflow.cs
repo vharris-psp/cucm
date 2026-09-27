@@ -144,6 +144,7 @@ internal sealed record ClassroomPhonePlan(
     string RoomNumber,
     ClassroomApplyScope Scope,
     string DevicePoolName,
+    string LocationName,
     string PhoneTemplateName,
     ClassroomLinePlan UserLine,
     ClassroomLinePlan RoomLine,
@@ -258,6 +259,10 @@ internal static class ClassroomPhonePlanner
             throw new InvalidOperationException(
                 $"Location '{input.BuildingCode}' must define 'devicePoolName' in " +
                 "'building-patterns' to use the classroom workflow.");
+        var locationName = Normalize(buildingPattern.LocationName) ??
+            throw new InvalidOperationException(
+                $"Location '{input.BuildingCode}' must define 'locationName' in its building profile " +
+                "to use the classroom workflow.");
         var mappedBuildings = PhoneConfigurationChecks.FindBuildingCodesForDevicePool(
             input.BuildingPatterns,
             devicePoolName);
@@ -356,6 +361,7 @@ internal static class ClassroomPhonePlanner
         var prospectivePhone = input.Phone with
         {
             DevicePoolName = devicePoolName,
+            LocationName = locationName,
             PhoneTemplateName = layout.PhoneTemplateName,
             OwnerUserName = includeUser ? userId : input.Phone.OwnerUserName,
             Lines = prospectiveLines,
@@ -399,6 +405,7 @@ internal static class ClassroomPhonePlanner
                 StringComparer.OrdinalIgnoreCase) == true;
         var updatePhoneProfile =
             !EqualsValue(input.Phone.DevicePoolName, devicePoolName) ||
+            !EqualsValue(input.Phone.LocationName, locationName) ||
             !EqualsValue(input.Phone.PhoneTemplateName, layout.PhoneTemplateName);
         var updateDescription = !string.Equals(
             input.Phone.Description,
@@ -427,6 +434,7 @@ internal static class ClassroomPhonePlanner
             input,
             layout,
             devicePoolName,
+            locationName,
             roomLine,
             userLine,
             includeRoom,
@@ -446,6 +454,7 @@ internal static class ClassroomPhonePlanner
             input.RoomNumber,
             input.Scope,
             devicePoolName,
+            locationName,
             layout.PhoneTemplateName,
             userLine,
             roomLine,
@@ -571,6 +580,7 @@ internal static class ClassroomPhonePlanner
         ClassroomPhonePlanInput input,
         ClassroomTemplateLayout layout,
         string devicePoolName,
+        string locationName,
         ClassroomLinePlan roomLine,
         ClassroomLinePlan userLine,
         bool includeRoom,
@@ -589,6 +599,7 @@ internal static class ClassroomPhonePlanner
         var changes = new List<ClassroomPhoneChange>
         {
             Change("phone.device-pool", "Device pool", input.Phone.DevicePoolName, devicePoolName, "Update"),
+            Change("phone.location", "Location", input.Phone.LocationName, locationName, "Update"),
             Change("phone.button-template", "Phone button template", input.Phone.PhoneTemplateName,
                 layout.PhoneTemplateName, "Update"),
             Change("room.dn", $"Room line {roomLine.Index} DN", roomCurrent?.Pattern,
@@ -902,6 +913,8 @@ internal interface IClassroomPhoneWriter
 
     Task UpdateDescriptionAsync(ClassroomPhonePlan plan, CancellationToken cancellationToken);
 
+    Task ApplyPhoneConfigurationAsync(string phoneName, CancellationToken cancellationToken);
+
     Task RecordLocalAssignmentAsync(ClassroomPhonePlan plan, CancellationToken cancellationToken);
 }
 
@@ -1018,6 +1031,14 @@ internal static class ClassroomPhoneExecutor
                 completed,
                 cancellationToken);
         }
+        if (completed.Count > 0)
+        {
+            await ExecuteAsync(
+                "phone-configuration-refresh",
+                ct => writer.ApplyPhoneConfigurationAsync(plan.PhoneName, ct),
+                completed,
+                cancellationToken);
+        }
 
         return new ClassroomPhoneApplyResult(completed);
     }
@@ -1129,7 +1150,8 @@ internal sealed class CucmClassroomPhoneWriter(
             plan.DevicePoolName,
             ownerUserName: null,
             cancellationToken,
-            plan.PhoneTemplateName);
+            plan.PhoneTemplateName,
+            plan.LocationName);
 
     public async Task CreateDirectoryNumberAsync(
         ClassroomLinePlan line,
@@ -1304,6 +1326,11 @@ internal sealed class CucmClassroomPhoneWriter(
             devicePoolName: null,
             ownerUserName: null,
             cancellationToken);
+
+    public Task ApplyPhoneConfigurationAsync(
+        string phoneName,
+        CancellationToken cancellationToken) =>
+        cucm.ApplyPhoneConfigurationAsync(phoneName, cancellationToken);
 
     public Task RecordLocalAssignmentAsync(
         ClassroomPhonePlan plan,

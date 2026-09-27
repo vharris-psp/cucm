@@ -65,6 +65,7 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.Equal(
             [
                 "phone.device-pool",
+                "phone.location",
                 "phone.button-template",
                 "room.dn",
                 "room.partition",
@@ -102,6 +103,7 @@ public sealed class ClassroomPhoneWorkflowTests
             plan.Changes.Where(change => change.Key == "phone.device-pool"));
 
         Assert.Equal("HS-Classroom", plan.DevicePoolName);
+        Assert.Equal("PHS", plan.LocationName);
         Assert.Equal("Old Pool", devicePoolChange.Current);
         Assert.Equal("HS-Classroom", devicePoolChange.Target);
         Assert.Equal("Update", devicePoolChange.Action);
@@ -120,7 +122,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "MS-Rooms",
                 ["MS-Legacy"],
                 "MS-UserRoom",
-                "MS-Classroom"),
+                "MS-Classroom",
+                LocationName: "PMS"),
         };
         var policies = new Dictionary<string, TemplateCompliancePolicy>(
             highSchoolInput.CompliancePolicies,
@@ -464,9 +467,10 @@ public sealed class ClassroomPhoneWorkflowTests
                 "external-mask-User",
                 "phone-description",
                 "local-assignment",
+                "phone-configuration-refresh",
             ],
             writer.Calls);
-        Assert.Equal(17, result.CompletedOperations.Count);
+        Assert.Equal(18, result.CompletedOperations.Count);
     }
 
     [Fact]
@@ -479,6 +483,7 @@ public sealed class ClassroomPhoneWorkflowTests
             {
                 Description = initial.Description,
                 DevicePoolName = initial.DevicePoolName,
+                LocationName = initial.LocationName,
                 PhoneTemplateName = initial.PhoneTemplateName,
                 OwnerUserName = initial.UserId,
                 Lines =
@@ -578,7 +583,8 @@ public sealed class ClassroomPhoneWorkflowTests
             "old-owner",
             [],
             "Old Pool",
-            "Old-Template");
+            "Old-Template",
+            LocationName: "Old Location");
         var user = new CucmUser(
             "user-uuid",
             "alice",
@@ -610,7 +616,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 ["HS-Legacy"],
                 "HS-UserRoom",
                 "HS-Classroom",
-                RoomExternalPhoneNumberMask: "555{room}"),
+                RoomExternalPhoneNumberMask: "555{room}",
+                LocationName: "PHS"),
         };
         var policies = new Dictionary<string, TemplateCompliancePolicy>(StringComparer.OrdinalIgnoreCase)
         {
@@ -729,6 +736,10 @@ public sealed class ClassroomPhoneWorkflowTests
         public Task UpdateDescriptionAsync(
             ClassroomPhonePlan plan,
             CancellationToken cancellationToken) => Record("phone-description");
+
+        public Task ApplyPhoneConfigurationAsync(
+            string phoneName,
+            CancellationToken cancellationToken) => Record("phone-configuration-refresh");
 
         public Task RecordLocalAssignmentAsync(
             ClassroomPhonePlan plan,

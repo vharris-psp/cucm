@@ -15,7 +15,8 @@ public sealed class BuildingProfileStoreTests : IDisposable
                 " CE-Rooms ",
                 [" CentralElem ", "CentralElem_SRST", "centralElem"],
                 " Standard 7841 SIP 1DN-1SdBLF-2DN ",
-                " CentralElem_SRST "));
+                " CentralElem_SRST ",
+                LocationName: " CE "));
 
         var profiles = await store.LoadAsync();
         var profile = Assert.Single(profiles).Value;
@@ -23,6 +24,7 @@ public sealed class BuildingProfileStoreTests : IDisposable
         Assert.Equal("CentralElem_SRST", profile.DevicePoolName);
         Assert.Equal(["CentralElem", "CentralElem_SRST"], profile.DevicePoolNames);
         Assert.Equal("Standard 7841 SIP 1DN-1SdBLF-2DN", profile.PhoneTemplateName);
+        Assert.Equal("CE", profile.LocationName);
         Assert.True(store.Exists);
     }
 

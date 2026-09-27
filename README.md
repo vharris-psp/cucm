@@ -157,6 +157,7 @@ The stored shape is:
       "routePartitionName": "HS-Rooms",
       "devicePoolName": "HighSchool",
       "devicePools": ["HighSchool", "HighSchool_SRST", "2024-HS-Pool"],
+      "locationName": "PHS",
       "phoneTemplateName": "Standard 7841 SIP 1DN-1SdBLF-2DN",
       "roomExternalPhoneNumberMask": "2313482160",
       "allCallNumber": "2313480199"
@@ -165,7 +166,7 @@ The stored shape is:
 }
 ```
 
-The selected location's `devicePoolName` is the device pool assigned to the phone before its room line is configured. This keeps device-pool-controlled local routing aligned with the room location. The `devicePools` list contains any additional existing pools that should resolve back to that location for audits; all mappings must remain disjoint. The selected `phoneTemplateName` is applied by the classroom workflow. `roomExternalPhoneNumberMask` and `allCallNumber` are both optional and specific to this building (see the classroom workflow section above); the add/edit wizard prompts for each but accepts a blank value to leave it unconfigured.
+The selected building's `devicePoolName`, `locationName`, and `phoneTemplateName` are assigned to the phone before its room line is configured. This keeps device-pool-controlled routing, media location, and button layout aligned with the room location. The `devicePools` list contains any additional existing pools that should resolve back to that building for audits; all mappings must remain disjoint. `roomExternalPhoneNumberMask` and `allCallNumber` are both optional and specific to this building (see the classroom workflow section above); the add/edit wizard prompts for each but accepts a blank value to leave it unconfigured.
 
 The legacy `building-patterns` setting's `devicePools` also accepts a bracket-free comma-separated string (e.g. `"HighSchool,HighSchool_SRST"`) in place of a JSON array — `vt module configure`'s value prompt crashes on a setting whose raw value contains literal `[`/`]` characters, so this form is required if you edit `building-patterns` through `vt module configure` rather than hand-editing the YAML file directly. `building-profiles.json` (the migrated local store) isn't affected, since it's never rendered by that generic prompt.
 
@@ -187,7 +188,7 @@ Optionally configure `user-did-forward-css` to have the classroom workflow manag
 
 The selected user's CUCM primary extension is authoritative when it is a four-digit DN; a four-digit LDAP telephone number is used only when no primary extension is assigned. The classroom workflow does not allocate from the local user-DN inventory when neither assigned value is available; that case must be handled through a dedicated allocation workflow.
 
-Before writing anything, the module renders a deterministic review of every managed current and target value: device pool, button template, both DNs and partitions, DN creation defaults, labels, caller ID, external masks, voicemail, owner and device associations, compliance description, and local inventory assignment. The explicit **Save** row is bound to that reviewed state. Save re-reads CUCM and rejects the submission if the phone, user, room, or policy-derived plan changed after review. It then applies only required operations and supports a no-write retry once the phone is converged. If CUCM fails partway through, the module reports the failed operation, the underlying CUCM/AXL error message, and the operations already completed; because AXL offers no transaction across these resources, it requires a fresh review before retry instead of claiming rollback.
+Before writing anything, the module renders a deterministic review of every managed current and target value: device pool, location, button template, both DNs and partitions, DN creation defaults, labels, caller ID, external masks, voicemail, owner and device associations, compliance description, and local inventory assignment. The explicit **Save** row is bound to that reviewed state. Save re-reads CUCM and rejects the submission if the phone, user, room, or configured classroom policy changed after review. It then applies only required operations and, when anything changed, asks CUCM to apply the pending configuration to the physical phone with a soft device refresh. An already-converged retry performs no writes or refresh. If CUCM fails partway through, the module reports the failed operation, the underlying CUCM/AXL error message, and the operations already completed; because AXL offers no transaction across these resources, it requires a fresh review before retry instead of claiming rollback.
 
 Every resolved `alertingName`, `display` (caller ID), and `label` value is validated against CUCM's own DeviceNumPlanMap constraint — 30 characters maximum and none of `[ ] " % < > & | { }` — before the review screen is even shown, so a template whose substituted text is too long (e.g. a fixed prefix combined with a long `{userDisplayName}`) or contains a disallowed character fails fast with a clear message instead of aborting mid-Save with a raw AXL fault.
 
