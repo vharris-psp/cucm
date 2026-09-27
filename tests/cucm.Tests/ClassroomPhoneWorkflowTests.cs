@@ -247,7 +247,7 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.False(plan.AllCallSpeedDial!.Update);
         var speedDialChange = Assert.Single(plan.Changes, change => change.Key == "phone.all-call");
         Assert.Equal("5551000", speedDialChange.Current);
-        Assert.Equal("No change", speedDialChange.Action);
+        Assert.Equal("Reapply BLF", speedDialChange.Action);
     }
 
     [Fact]
@@ -345,6 +345,38 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.Contains("all-call-speed-dial", writer.Calls);
         Assert.Contains("remove-misplaced-all-call-speed-dial-1", writer.Calls);
         Assert.Contains("remove-misplaced-all-call-speed-dial-2", writer.Calls);
+    }
+
+    [Fact]
+    public async Task SaveReappliesMatchingAllCallBlfAndRefreshesPhone()
+    {
+        var original = CreatePlan();
+        var plan = original with
+        {
+            UpdatePhoneProfile = false,
+            RoomLine = Converged(original.RoomLine),
+            UserLine = Converged(original.UserLine),
+            AllCallSpeedDial = new ClassroomSpeedDialPlan(1, "#9000", "All Call", false, []),
+            AddUserAssociation = false,
+            RemovePreviousOwnerAssociation = false,
+            UpdateDescription = false,
+            RecordLocalAssignment = false,
+        };
+        var writer = new RecordingWriter();
+
+        await ClassroomPhoneExecutor.ExecuteAsync(plan, writer);
+
+        Assert.Equal(["all-call-speed-dial", "phone-configuration-refresh"], writer.Calls);
+
+        static ClassroomLinePlan Converged(ClassroomLinePlan line) => line with
+        {
+            CreateDirectoryNumber = false,
+            AssignLine = false,
+            UpdateDirectoryNumber = false,
+            UpdateDisplay = false,
+            UpdateLabel = false,
+            UpdateExternalMask = false,
+        };
     }
 
     [Fact]

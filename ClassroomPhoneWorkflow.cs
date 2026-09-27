@@ -724,8 +724,8 @@ internal static class ClassroomPhonePlanner
             {
                 (true, > 0) => $"Update BLF; remove {cleanupCount} misplaced regular speed dial(s)",
                 (true, _) => "Update BLF",
-                (false, > 0) => $"Remove {cleanupCount} misplaced regular speed dial(s)",
-                _ => "No change",
+                (false, > 0) => $"Reapply BLF; remove {cleanupCount} misplaced regular speed dial(s)",
+                _ => "Reapply BLF",
             };
         }
     }
@@ -997,7 +997,7 @@ internal static class ClassroomPhoneExecutor
                 completed,
                 cancellationToken);
         }
-        if (plan.AllCallSpeedDial is { Update: true } allCallSpeedDial)
+        if (plan.AllCallSpeedDial is { } allCallSpeedDial)
         {
             await ExecuteAsync(
                 "all-call-speed-dial",
