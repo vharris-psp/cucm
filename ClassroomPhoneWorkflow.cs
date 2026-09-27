@@ -422,7 +422,7 @@ internal static class ClassroomPhonePlanner
             includeUser && input.UserDidUsesInventoryFallback && input.UserDid.Assignment is null;
 
         ClassroomSpeedDialPlan? allCallSpeedDial = null;
-        if (includeRoom && layout.SpeedDialButtonIndex is not null)
+        if (layout.SpeedDialButtonIndex is not null)
         {
             var allCallNumber = Normalize(buildingPattern.AllCallNumber);
             if (allCallNumber is not null)

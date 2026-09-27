@@ -65,6 +65,24 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task RoomMaskRowRoutesToMaskPrompt()
+    {
+        using var cucm = CreateCucm();
+        var outcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(["buildings", "select", "PHS"]),
+            cucm);
+
+        var response = Assert.IsType<ModuleTableResponse>(
+            Assert.IsType<ModuleCommandResult>(outcome).Response);
+        Assert.Equal(
+            [
+                "configure", "buildings", "edit-mask", "PHS", "HS-Rooms", "HighSchool",
+                "PHS", "HighSchool,HighSchool_SRST", "Standard 7841 SIP 1DN-1SdBLF-2DN",
+            ],
+            Assert.Single(response.Rows, row => row.Id == "room-mask").Arguments);
+    }
+
+    [Fact]
     public async Task DevicePoolSelectionUsesItsRegionAsPhoneLocation()
     {
         var handler = new FakeHandler(

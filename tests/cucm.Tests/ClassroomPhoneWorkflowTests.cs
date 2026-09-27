@@ -406,6 +406,36 @@ public sealed class ClassroomPhoneWorkflowTests
     }
 
     [Fact]
+    public void UserOnlyScopeStillAppliesConfiguredAllCallBlf()
+    {
+        var input = CreateInput();
+        var plan = ClassroomPhonePlanner.Create(input with
+        {
+            Scope = ClassroomApplyScope.UserOnly,
+            BuildingPatterns = new Dictionary<string, BuildingPattern>(
+                input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "#9000" },
+            },
+            CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
+                input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS-UserRoom"] = new TemplateCompliancePolicy(
+                    [
+                        .. input.CompliancePolicies["HS-UserRoom"].Slots,
+                        new TemplateComplianceSlot(6, TemplateComplianceSlotKind.SpeedDial),
+                    ]),
+            },
+        });
+
+        Assert.NotNull(plan.AllCallSpeedDial);
+        Assert.Equal("#9000", plan.AllCallSpeedDial!.Destination);
+        Assert.Equal(
+            "Update BLF",
+            Assert.Single(plan.Changes, change => change.Key == "phone.all-call").Action);
+    }
+
+    [Fact]
     public void UserDnNoAnswerForwardsToVoiceMailWithoutChangingOtherForwardTargets()
     {
         var plan = ClassroomPhonePlanner.Create(CreateInput() with

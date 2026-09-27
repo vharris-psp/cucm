@@ -86,14 +86,22 @@ internal static class BuildingConfigurationCommand
                 legacyConfiguration,
                 context.CancellationToken);
             var profile = RequireProfile(profiles, selectedCode);
-            IReadOnlyList<string>? allCallArguments =
+            var canEditDependentFields =
                 profile.DevicePoolName is not null &&
                 profile.LocationName is not null &&
-                profile.PhoneTemplateName is not null
+                profile.PhoneTemplateName is not null;
+            IReadOnlyList<string>? maskArguments = canEditDependentFields
+                    ? [
+                        "configure", "buildings", "edit-mask", selectedCode,
+                        profile.RoutePartitionName, profile.DevicePoolName!, profile.LocationName!,
+                        string.Join(",", profile.DevicePoolNames), profile.PhoneTemplateName!,
+                    ]
+                    : null;
+            IReadOnlyList<string>? allCallArguments = canEditDependentFields
                     ? [
                         "configure", "buildings", "edit-allcall", selectedCode,
-                        profile.RoutePartitionName, profile.DevicePoolName, profile.LocationName,
-                        string.Join(",", profile.DevicePoolNames), profile.PhoneTemplateName,
+                        profile.RoutePartitionName, profile.DevicePoolName!, profile.LocationName!,
+                        string.Join(",", profile.DevicePoolNames), profile.PhoneTemplateName!,
                         profile.RoomExternalPhoneNumberMask ?? string.Empty,
                     ]
                     : null;
@@ -110,7 +118,8 @@ internal static class BuildingConfigurationCommand
                 new("template", ["Phone button template", profile.PhoneTemplateName ?? "<phone default>"]),
                 new(
                     "room-mask",
-                    ["Room external phone number mask", profile.RoomExternalPhoneNumberMask ?? "<not configured>"]),
+                    ["Room external phone number mask", profile.RoomExternalPhoneNumberMask ?? "<not configured>"],
+                    maskArguments),
                 new(
                     "all-call",
                     ["All Call number", profile.AllCallNumber ?? "<not configured>"],
