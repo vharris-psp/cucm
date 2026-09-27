@@ -1,3 +1,4 @@
+using System.Net;
 using VSharp.Cucm;
 using Vt.ModuleSdk;
 
@@ -31,7 +32,7 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task LocationRowRoutesToDedicatedSelector()
+    public async Task LocationRowRoutesToDevicePoolSelector()
     {
         using var cucm = CreateCucm();
         var outcome = await BuildingConfigurationCommand.ExecuteAsync(
@@ -41,37 +42,40 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
         var response = Assert.IsType<ModuleTableResponse>(
             Assert.IsType<ModuleCommandResult>(outcome).Response);
         Assert.Equal(
-            ["configure", "buildings", "select-location", "PHS"],
+            ["configure", "buildings", "edit-device-pool", "PHS", "HS-Rooms"],
             Assert.Single(response.Rows, row => row.Id == "location").Arguments);
     }
 
     [Fact]
-    public async Task LocationChangeRequiresReviewAndPreservesOtherProfileValues()
+    public async Task DevicePoolSelectionUsesItsRegionAsPhoneLocation()
     {
-        using var cucm = CreateCucm();
-        var reviewOutcome = await BuildingConfigurationCommand.ExecuteAsync(
-            CreateContext(["buildings", "review-location", "PHS", "PHS-New"]),
+        var handler = new FakeHandler(
+            """
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+              <soapenv:Body>
+                <listDevicePoolResponse>
+                  <return>
+                    <devicePool uuid="pool-uuid">
+                      <name>HighSchool</name>
+                      <regionName>PHS</regionName>
+                    </devicePool>
+                  </return>
+                </listDevicePoolResponse>
+              </soapenv:Body>
+            </soapenv:Envelope>
+            """);
+        using var cucm = CreateCucm(handler);
+        var outcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(["buildings", "edit-device-pool", "PHS", "HS-Rooms"]),
             cucm);
 
-        var review = Assert.IsType<ModuleTableResponse>(
-            Assert.IsType<ModuleCommandResult>(reviewOutcome).Response);
-        Assert.Equal(ModuleTableSubmitMode.Save, review.SubmitMode);
+        var response = Assert.IsType<ModuleTableResponse>(
+            Assert.IsType<ModuleCommandResult>(outcome).Response);
+        var pool = Assert.Single(response.Rows);
+        Assert.Equal(["HighSchool", "PHS"], pool.Cells);
         Assert.Equal(
-            ["configure", "buildings", "save-location", "PHS", "PHS-New"],
-            Assert.Single(review.Rows, row => row.Id == "save").Arguments);
-        Assert.False(new BuildingProfileStore(_directory).Exists);
-
-        var saveOutcome = await BuildingConfigurationCommand.ExecuteAsync(
-            CreateContext(["buildings", "save-location", "PHS", "PHS-New"]),
-            cucm);
-
-        Assert.Equal(0, Assert.IsType<ModuleCommandResult>(saveOutcome).ExitCode);
-        var stored = Assert.Single(await new BuildingProfileStore(_directory).LoadAsync()).Value;
-        Assert.Equal("PHS-New", stored.LocationName);
-        Assert.Equal("HS-Rooms", stored.RoutePartitionName);
-        Assert.Equal("HighSchool", stored.DevicePoolName);
-        Assert.Equal(["HighSchool", "HighSchool_SRST"], stored.DevicePoolNames);
-        Assert.Equal("Standard 7841 SIP 1DN-1SdBLF-2DN", stored.PhoneTemplateName);
+            ["configure", "buildings", "edit-recognized", "PHS", "HS-Rooms", "HighSchool", "PHS"],
+            pool.Arguments);
     }
 
     [Fact]
@@ -113,12 +117,12 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
     }
 
     [Fact]
-    public void LoadingStatusDescribesLocationSelector()
+    public void LoadingStatusDescribesDevicePoolRegionLookup()
     {
         Assert.Equal(
-            "Loading CUCM phone locations",
+            "Loading CUCM device pools",
             BuildingConfigurationCommand.LoadingStatus(
-                ["buildings", "edit-location", "PHS", "HS-Rooms", "HighSchool"]));
+                ["buildings", "edit-device-pool", "PHS", "HS-Rooms"]));
     }
 
     [Theory]
@@ -147,12 +151,26 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
             new Dictionary<string, string>(),
             _directory);
 
-    private static CucmService CreateCucm() =>
-        new(new CucmServiceConfig(
+    private static CucmService CreateCucm(HttpMessageHandler? handler = null)
+    {
+        var config = new CucmServiceConfig(
             "https://cucm.invalid/axl/",
             "14.0",
             "test-user",
-            "test-password"));
+            "test-password");
+        return handler is null ? new CucmService(config) : new CucmService(config, new HttpClient(handler));
+    }
+
+    private sealed class FakeHandler(string responseBody) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseBody),
+            });
+    }
 
     public void Dispose()
     {

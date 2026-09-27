@@ -15,6 +15,11 @@ internal sealed class CucmResourceQueryService(CucmService cucm)
         CancellationToken cancellationToken) =>
         MaterializeAsync(cucm.ListDevicePoolsAsync(cancellationToken: cancellationToken), cancellationToken);
 
+    internal Task<IReadOnlyList<CucmDevicePool>> ListDevicePoolsWithRegionAsync(
+        CancellationToken cancellationToken) =>
+        MaterializeDevicePoolsAsync(
+            cucm.ListDevicePoolsWithRegionAsync(cancellationToken: cancellationToken), cancellationToken);
+
     internal Task<IReadOnlyList<CucmNamedResource>> ListLocationsAsync(
         CancellationToken cancellationToken) =>
         MaterializeAsync(cucm.ListLocationsAsync(cancellationToken: cancellationToken), cancellationToken);
@@ -54,6 +59,22 @@ internal sealed class CucmResourceQueryService(CucmService cucm)
             if (!string.IsNullOrWhiteSpace(resource.Name))
             {
                 results.Add(resource);
+            }
+        }
+        results.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+        return results;
+    }
+
+    private static async Task<IReadOnlyList<CucmDevicePool>> MaterializeDevicePoolsAsync(
+        IAsyncEnumerable<CucmDevicePool> devicePools,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<CucmDevicePool>();
+        await foreach (var devicePool in devicePools.WithCancellation(cancellationToken))
+        {
+            if (!string.IsNullOrWhiteSpace(devicePool.Name))
+            {
+                results.Add(devicePool);
             }
         }
         results.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
