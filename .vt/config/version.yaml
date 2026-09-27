@@ -1,5 +1,5 @@
-version: "0.11.0"
-vt_version: "1.5.0"
+version: "0.11.1"
+vt_version: "1.5.1"
 project_file: "cucm.csproj"
 dependencies:
   - "VSharp"
