@@ -667,9 +667,8 @@ public sealed class ClassroomPhoneWorkflowTests
             .Descendants()
             .Single(element => element.Name.LocalName == "busyLampField");
         Assert.Equal(
-            ["blfDest", "blfDirn", "routePartition", "label", "index"],
+            ["blfDirn", "routePartition", "label", "index"],
             busyLampField.Elements().Select(element => element.Name.LocalName));
-        Assert.Empty(busyLampField.Elements().Single(e => e.Name.LocalName == "blfDest").Value);
         Assert.Equal("#9000", busyLampField.Elements().Single(e => e.Name.LocalName == "blfDirn").Value);
         Assert.Equal(
             "Local",
