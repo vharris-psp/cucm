@@ -4203,7 +4203,7 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
         RoutePartitionName = userDirectoryNumber?.RoutePartitionName ??
             userDidSelection.Did.RoutePartitionName ??
             Normalize(userDidDefaults.Partition),
-        Description = userDirectoryNumber?.Description ?? userDidSelection.Did.Description ??
+        Description = userDidSelection.Did.Description ??
             $"{userDidDefaults.DescriptionPrefix ?? "User DID"} " +
             userDidSelection.Did.Pattern,
         CallingSearchSpaceName = userDirectoryNumber?.CallingSearchSpaceName ??

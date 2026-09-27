@@ -114,6 +114,8 @@ internal sealed record ClassroomLinePlan(
     string Display,
     string Label,
     string? ExternalPhoneNumberMask,
+    string? ExternalPresentationNumber,
+    string? ExternalPresentationName,
     string VoiceMailProfileName,
     string? OwnerUserId,
     bool CreateDirectoryNumber,
@@ -555,7 +557,10 @@ internal static class ClassroomPhonePlanner
         var externalMask = template.ExternalPhoneNumberMask is null && !requireExternalMask
             ? null
             : Resolve(template.ExternalPhoneNumberMask, "externalPhoneNumberMask");
+        var externalPresentationNumber = ResolveExternalPresentationNumber(externalMask, pattern);
+        var externalPresentationName = externalPresentationNumber is null ? null : display;
         var voiceMailProfileName = Resolve(template.VoiceMailProfileName, "voiceMailProfileName");
+        var normalizedDescription = Normalize(description);
         var currentLine = phone.Lines.FirstOrDefault(line => line.Index == index);
         var assignLine = currentLine is null ||
             !string.Equals(currentLine.Pattern, pattern, StringComparison.Ordinal) ||
@@ -570,19 +575,26 @@ internal static class ClassroomPhonePlanner
             index,
             pattern,
             routePartitionName,
-            Normalize(description),
+            normalizedDescription,
             Normalize(callingSearchSpaceName),
             alertingName,
             display,
             label,
             externalMask,
+            externalPresentationNumber,
+            externalPresentationName,
             voiceMailProfileName,
             ownerUserId,
             directoryNumber is null,
             assignLine,
             directoryNumber is null ||
+                normalizedDescription is not null &&
+                    !EqualsValue(directoryNumber.Description, normalizedDescription) ||
                 !EqualsValue(directoryNumber.AlertingName, alertingName) ||
                 !EqualsValue(directoryNumber.VoiceMailProfileName, voiceMailProfileName) ||
+                externalPresentationNumber is not null &&
+                    (!EqualsValue(directoryNumber.ExternalPresentationNumber, externalPresentationNumber) ||
+                     !EqualsValue(directoryNumber.ExternalPresentationName, externalPresentationName)) ||
                 needsForwardPolicyUpdate,
             !EqualsValue(currentLine?.Display, display) || !EqualsValue(currentLine?.DisplayAscii, display),
             !EqualsValue(currentLine?.Label, label),
@@ -625,8 +637,7 @@ internal static class ClassroomPhonePlanner
             Change("room.partition", "Room partition", roomCurrent?.RoutePartitionName,
                 roomLine.RoutePartitionName, "Assign", includeRoom),
             Change("room.description", "Room DN description", input.RoomDirectoryNumber?.Description,
-                roomLine.CreateDirectoryNumber ? roomLine.Description : input.RoomDirectoryNumber?.Description,
-                roomLine.CreateDirectoryNumber ? "Create value" : "No change", includeRoom),
+                roomLine.Description, roomLine.CreateDirectoryNumber ? "Create value" : "Update", includeRoom),
             Change("room.alerting-name", "Room alerting name", input.RoomDirectoryNumber?.AlertingName,
                 roomLine.AlertingName, "Update", includeRoom),
             Change("room.caller-id", "Room caller ID", roomCurrent?.Display,
@@ -643,6 +654,20 @@ internal static class ClassroomPhonePlanner
                     : roomLine.ExternalPhoneNumberMask is null ? "Configure via 'configure buildings'"
                     : EqualsValue(roomCurrent?.ExternalPhoneNumberMask, roomLine.ExternalPhoneNumberMask)
                         ? "No change" : "Update"),
+            PresentationChange(
+                "room.external-presentation-number",
+                "Room external presentation number",
+                input.RoomDirectoryNumber?.ExternalPresentationNumber,
+                roomLine.ExternalPresentationNumber,
+                roomLine.CreateDirectoryNumber,
+                includeRoom),
+            PresentationChange(
+                "room.external-presentation-name",
+                "Room external presentation name",
+                input.RoomDirectoryNumber?.ExternalPresentationName,
+                roomLine.ExternalPresentationName,
+                roomLine.CreateDirectoryNumber,
+                includeRoom),
             Change("room.voicemail", "Room voicemail profile", input.RoomDirectoryNumber?.VoiceMailProfileName,
                 roomLine.VoiceMailProfileName, "Update", includeRoom),
             Change("user.dn", $"User line {userLine.Index} DN", userCurrent?.Pattern,
@@ -650,8 +675,7 @@ internal static class ClassroomPhonePlanner
             Change("user.partition", "User partition", userCurrent?.RoutePartitionName,
                 userLine.RoutePartitionName, "Assign", includeUser),
             Change("user.description", "User DN description", input.UserDirectoryNumber?.Description,
-                userLine.CreateDirectoryNumber ? userLine.Description : input.UserDirectoryNumber?.Description,
-                userLine.CreateDirectoryNumber ? "Create value" : "No change", includeUser),
+                userLine.Description, userLine.CreateDirectoryNumber ? "Create value" : "Update", includeUser),
             Change("user.css", "User calling search space", input.UserDirectoryNumber?.CallingSearchSpaceName,
                 userLine.CreateDirectoryNumber
                     ? userLine.CallingSearchSpaceName
@@ -664,6 +688,20 @@ internal static class ClassroomPhonePlanner
             Change("user.label", "User label", userCurrent?.Label, userLine.Label, "Update", includeUser),
             Change("user.external-mask", "User external mask", userCurrent?.ExternalPhoneNumberMask,
                 userLine.ExternalPhoneNumberMask, "Update", includeUser),
+            PresentationChange(
+                "user.external-presentation-number",
+                "User external presentation number",
+                input.UserDirectoryNumber?.ExternalPresentationNumber,
+                userLine.ExternalPresentationNumber,
+                userLine.CreateDirectoryNumber,
+                includeUser),
+            PresentationChange(
+                "user.external-presentation-name",
+                "User external presentation name",
+                input.UserDirectoryNumber?.ExternalPresentationName,
+                userLine.ExternalPresentationName,
+                userLine.CreateDirectoryNumber,
+                includeUser),
             Change("user.voicemail", "User voicemail profile", input.UserDirectoryNumber?.VoiceMailProfileName,
                 userLine.VoiceMailProfileName, "Update", includeUser),
             Change("user.owner", "Phone and user-line owner", input.Phone.OwnerUserName,
@@ -716,6 +754,25 @@ internal static class ClassroomPhonePlanner
                     : "No change"));
         }
         return changes;
+
+        static ClassroomPhoneChange PresentationChange(
+            string key,
+            string field,
+            string? current,
+            string? target,
+            bool createDirectoryNumber,
+            bool included)
+        {
+            if (!included)
+            {
+                return new ClassroomPhoneChange(key, field, Display(current), "<Not applied>", "Skip (excluded)");
+            }
+            if (target is null)
+            {
+                return new ClassroomPhoneChange(key, field, Display(current), "<Not configured>", "Not managed");
+            }
+            return Change(key, field, current, target, createDirectoryNumber ? "Create value" : "Update");
+        }
 
         static string AllCallAction(ClassroomSpeedDialPlan speedDial)
         {
@@ -786,6 +843,34 @@ internal static class ClassroomPhonePlanner
                 "allow []\"%<>&|{} in this field.");
         }
         return value;
+    }
+
+    internal static string? ResolveExternalPresentationNumber(string? externalMask, string pattern)
+    {
+        var normalizedMask = Normalize(externalMask);
+        if (normalizedMask is null)
+        {
+            return null;
+        }
+
+        var digits = pattern.Where(char.IsAsciiDigit).ToArray();
+        var digitIndex = digits.Length - 1;
+        var resolved = normalizedMask.ToCharArray();
+        for (var index = resolved.Length - 1; index >= 0; index--)
+        {
+            if (resolved[index] is not ('X' or 'x'))
+            {
+                continue;
+            }
+            if (digitIndex < 0)
+            {
+                throw new InvalidOperationException(
+                    $"External phone number mask '{normalizedMask}' requires more DN digits than " +
+                    $"'{pattern}' provides.");
+            }
+            resolved[index] = digits[digitIndex--];
+        }
+        return new string(resolved);
     }
 
     private static LineTemplate CreateClassroomRoomTemplate(LineTemplate defaults) => defaults with
@@ -908,27 +993,9 @@ internal interface IClassroomPhoneWriter
 
     Task CreateDirectoryNumberAsync(ClassroomLinePlan line, CancellationToken cancellationToken);
 
-    Task AssignLineAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken);
+    Task UpdateLineAppearancesAsync(ClassroomPhonePlan plan, CancellationToken cancellationToken);
 
     Task UpdateDirectoryNumberAsync(ClassroomLinePlan line, CancellationToken cancellationToken);
-
-    Task UpdateLineDisplayAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken);
-
-    Task UpdateLineLabelAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken);
-
-    Task UpdateLineExternalMaskAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken);
 
     Task UpdateAllCallSpeedDialAsync(
         string phoneName,
@@ -1017,19 +1084,17 @@ internal static class ClassroomPhoneExecutor
             }
         }
         await ExecuteLineCreationAsync(plan.RoomLine, writer, completed, cancellationToken);
-        await ExecuteLineAssignmentAsync(
-            plan.PhoneName,
-            plan.RoomLine,
-            writer,
-            completed,
-            cancellationToken);
-        await ExecuteLineOptionsAsync(
-            plan.PhoneName,
-            plan.RoomLine,
-            writer,
-            completed,
-            cancellationToken);
+        await ExecuteDirectoryNumberOptionsAsync(plan.RoomLine, writer, completed, cancellationToken);
         await ExecuteLineCreationAsync(plan.UserLine, writer, completed, cancellationToken);
+        await ExecuteDirectoryNumberOptionsAsync(plan.UserLine, writer, completed, cancellationToken);
+        if (NeedsLineAppearanceUpdate(plan.RoomLine) || NeedsLineAppearanceUpdate(plan.UserLine))
+        {
+            await ExecuteAsync(
+                "phone-line-appearances",
+                ct => writer.UpdateLineAppearancesAsync(plan, ct),
+                completed,
+                cancellationToken);
+        }
         if (plan.AddUserAssociation)
         {
             await ExecuteAsync(
@@ -1046,21 +1111,6 @@ internal static class ClassroomPhoneExecutor
                 completed,
                 cancellationToken);
         }
-        if (plan.UserLine.AssignLine)
-        {
-            await ExecuteLineAssignmentAsync(
-                plan.PhoneName,
-                plan.UserLine,
-                writer,
-                completed,
-                cancellationToken);
-        }
-        await ExecuteLineOptionsAsync(
-            plan.PhoneName,
-            plan.UserLine,
-            writer,
-            completed,
-            cancellationToken);
         if (plan.UpdateDescription)
         {
             await ExecuteAsync(
@@ -1106,25 +1156,7 @@ internal static class ClassroomPhoneExecutor
         }
     }
 
-    private static async Task ExecuteLineAssignmentAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        IClassroomPhoneWriter writer,
-        List<string> completed,
-        CancellationToken cancellationToken)
-    {
-        if (line.AssignLine)
-        {
-            await ExecuteAsync(
-                line.Kind.ToLowerInvariant() + $"-line-{line.Index}-assign",
-                ct => writer.AssignLineAsync(phoneName, line, ct),
-                completed,
-                cancellationToken);
-        }
-    }
-
-    private static async Task ExecuteLineOptionsAsync(
-        string phoneName,
+    private static async Task ExecuteDirectoryNumberOptionsAsync(
         ClassroomLinePlan line,
         IClassroomPhoneWriter writer,
         List<string> completed,
@@ -1139,31 +1171,10 @@ internal static class ClassroomPhoneExecutor
                 completed,
                 cancellationToken);
         }
-        if (line.UpdateDisplay)
-        {
-            await ExecuteAsync(
-                prefix + "-caller-id",
-                ct => writer.UpdateLineDisplayAsync(phoneName, line, ct),
-                completed,
-                cancellationToken);
-        }
-        if (line.UpdateLabel)
-        {
-            await ExecuteAsync(
-                prefix + "-label",
-                ct => writer.UpdateLineLabelAsync(phoneName, line, ct),
-                completed,
-                cancellationToken);
-        }
-        if (line.UpdateExternalMask)
-        {
-            await ExecuteAsync(
-                prefix + "-external-mask",
-                ct => writer.UpdateLineExternalMaskAsync(phoneName, line, ct),
-                completed,
-                cancellationToken);
-        }
     }
+
+    private static bool NeedsLineAppearanceUpdate(ClassroomLinePlan line) =>
+        line.AssignLine || line.UpdateDisplay || line.UpdateLabel || line.UpdateExternalMask;
 
     private static async Task ExecuteAsync(
         string operation,
@@ -1222,7 +1233,10 @@ internal sealed class CucmClassroomPhoneWriter(
                 CallForwardNotRegistered: forward.NotRegistered,
                 CallForwardNotRegisteredInternal: forward.NotRegisteredInternal,
                 CallingSearchSpaceActivationPolicy: line.CallingSearchSpaceActivationPolicy,
-                ClearCallPickupGroup: line.ClearCallPickupGroup),
+                ClearCallPickupGroup: line.ClearCallPickupGroup,
+                ExternalPresentationNumber: line.ExternalPresentationNumber,
+                ExternalPresentationName: line.ExternalPresentationName,
+                AlertingName: line.AlertingName),
             cancellationToken);
         if (forward.All is not null)
         {
@@ -1233,24 +1247,35 @@ internal sealed class CucmClassroomPhoneWriter(
         }
     }
 
-    public Task AssignLineAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken) =>
-        line.OwnerUserId is null
-            ? cucm.AssignPhoneLineDirectoryNumberAsync(
-                phoneName,
-                line.Index,
-                line.Pattern,
-                line.RoutePartitionName,
-                cancellationToken)
-            : cucm.AssignPhoneLineDirectoryNumberToUserAsync(
-                phoneName,
-                line.Index,
-                line.Pattern,
-                line.RoutePartitionName,
-                line.OwnerUserId,
-                cancellationToken);
+    public Task UpdateLineAppearancesAsync(
+        ClassroomPhonePlan plan,
+        CancellationToken cancellationToken)
+    {
+        var lines = new List<CucmPhoneLineAssignment>();
+        if (plan.Scope != ClassroomApplyScope.UserOnly)
+        {
+            lines.Add(ToAssignment(plan.RoomLine));
+        }
+        if (plan.Scope != ClassroomApplyScope.RoomOnly)
+        {
+            lines.Add(ToAssignment(plan.UserLine));
+        }
+        return cucm.AssignPhoneLinesAsync(
+            new CucmPhoneLineAssignmentRequest(
+                plan.PhoneName,
+                lines,
+                plan.Scope == ClassroomApplyScope.RoomOnly ? null : plan.UserId),
+            cancellationToken);
+
+        static CucmPhoneLineAssignment ToAssignment(ClassroomLinePlan line) => new(
+            line.Index,
+            line.Pattern,
+            line.RoutePartitionName,
+            line.Display,
+            line.Display,
+            line.Label,
+            line.ExternalPhoneNumberMask);
+    }
 
     public Task UpdateDirectoryNumberAsync(
         ClassroomLinePlan line,
@@ -1261,6 +1286,7 @@ internal sealed class CucmClassroomPhoneWriter(
             new CucmDirectoryNumberUpdateRequest(
                 line.Pattern,
                 line.RoutePartitionName,
+                Description: line.Description,
                 VoiceMailProfileName: line.VoiceMailProfileName,
                 AlertingName: line.AlertingName,
                 AssociatedUserId: line.OwnerUserId,
@@ -1275,7 +1301,9 @@ internal sealed class CucmClassroomPhoneWriter(
                 CallForwardNotRegistered: forward.NotRegistered,
                 CallForwardNotRegisteredInternal: forward.NotRegisteredInternal,
                 CallingSearchSpaceActivationPolicy: line.CallingSearchSpaceActivationPolicy,
-                ClearCallPickupGroup: line.ClearCallPickupGroup),
+                ClearCallPickupGroup: line.ClearCallPickupGroup,
+                ExternalPresentationNumber: line.ExternalPresentationNumber,
+                ExternalPresentationName: line.ExternalPresentationName),
             cancellationToken);
     }
 
@@ -1307,33 +1335,6 @@ internal sealed class CucmClassroomPhoneWriter(
         return (settings, settings, settings, noAnswerSettings, noAnswerSettings, settings, settings, settings,
             settings, settings);
     }
-
-    public Task UpdateLineDisplayAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken) =>
-        cucm.UpdatePhoneLineDisplayAsync(
-            phoneName,
-            line.Index,
-            line.Display,
-            line.Display,
-            cancellationToken);
-
-    public Task UpdateLineLabelAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken) =>
-        cucm.UpdatePhoneLineLabelAsync(phoneName, line.Index, line.Label, cancellationToken);
-
-    public Task UpdateLineExternalMaskAsync(
-        string phoneName,
-        ClassroomLinePlan line,
-        CancellationToken cancellationToken) =>
-        cucm.UpdatePhoneLineExternalMaskAsync(
-            phoneName,
-            line.Index,
-            line.ExternalPhoneNumberMask,
-            cancellationToken);
 
     public Task UpdateAllCallSpeedDialAsync(
         string phoneName,

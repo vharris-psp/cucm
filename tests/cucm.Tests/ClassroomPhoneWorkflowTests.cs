@@ -74,6 +74,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "room.caller-id",
                 "room.label",
                 "room.external-mask",
+                "room.external-presentation-number",
+                "room.external-presentation-name",
                 "room.voicemail",
                 "user.dn",
                 "user.partition",
@@ -83,6 +85,8 @@ public sealed class ClassroomPhoneWorkflowTests
                 "user.caller-id",
                 "user.label",
                 "user.external-mask",
+                "user.external-presentation-number",
+                "user.external-presentation-name",
                 "user.voicemail",
                 "user.owner",
                 "user.dn-association",
@@ -180,6 +184,55 @@ public sealed class ClassroomPhoneWorkflowTests
         var maskChange = Assert.Single(plan.Changes.Where(change => change.Key == "room.external-mask"));
         Assert.Equal("<Not configured for building>", maskChange.Target);
         Assert.Equal("Configure via 'configure buildings'", maskChange.Action);
+    }
+
+    [Fact]
+    public void PlannerExpandsConfiguredMaskIntoDnExternalPresentationInformation()
+    {
+        var input = CreateInput();
+        var plan = ClassroomPhonePlanner.Create(input with
+        {
+            UserTemplate = input.UserTemplate with { ExternalPhoneNumberMask = "231348XXXX" },
+        });
+
+        Assert.Equal("2313481234", plan.UserLine.ExternalPresentationNumber);
+        Assert.Equal("Alice Example", plan.UserLine.ExternalPresentationName);
+        Assert.Equal(
+            "2313481234",
+            Assert.Single(plan.Changes, change => change.Key == "user.external-presentation-number").Target);
+    }
+
+    [Fact]
+    public void PlannerUpdatesExistingDnIdentityAndExternalPresentationInformation()
+    {
+        var initial = CreatePlan();
+        var input = CreateInput();
+        var plan = ClassroomPhonePlanner.Create(input with
+        {
+            UserDirectoryNumber = ToDirectoryNumber(initial.UserLine) with
+            {
+                Description = "Previous user",
+                AlertingName = "Previous user",
+                ExternalPresentationNumber = "2313489999",
+                ExternalPresentationName = "Previous user",
+            },
+            RoomDirectoryNumber = ToDirectoryNumber(initial.RoomLine) with
+            {
+                Description = "Previous room",
+                AlertingName = "Previous room",
+                ExternalPresentationNumber = "2313489998",
+                ExternalPresentationName = "Previous room",
+            },
+        });
+
+        Assert.True(plan.UserLine.UpdateDirectoryNumber);
+        Assert.True(plan.RoomLine.UpdateDirectoryNumber);
+        Assert.Equal(
+            "User DID 1234",
+            Assert.Single(plan.Changes, change => change.Key == "user.description").Target);
+        Assert.Equal(
+            "HS Room 130",
+            Assert.Single(plan.Changes, change => change.Key == "room.alerting-name").Target);
     }
 
     [Fact]
@@ -510,7 +563,9 @@ public sealed class ClassroomPhoneWorkflowTests
             CallForwardNoCoverageInternal: forwarding,
             CallForwardOnFailure: forwarding,
             CallForwardNotRegistered: forwarding,
-            CallForwardNotRegisteredInternal: forwarding);
+            CallForwardNotRegisteredInternal: forwarding,
+            ExternalPresentationNumber: "5551234",
+            ExternalPresentationName: "Alice Example");
 
         var plan = ClassroomPhonePlanner.Create(CreateInput() with
         {
@@ -546,7 +601,7 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.DoesNotContain(writer.Calls, call => call == "selected-user-association");
         Assert.DoesNotContain(writer.Calls, call => call == "local-assignment");
         Assert.Contains("create-Room", writer.Calls);
-        Assert.Contains("assign-Room", writer.Calls);
+        Assert.Contains("phone-line-appearances", writer.Calls);
         Assert.NotEmpty(result.CompletedOperations);
     }
 
@@ -592,25 +647,18 @@ public sealed class ClassroomPhoneWorkflowTests
             [
                 "phone-profile",
                 "create-Room",
-                "assign-Room",
                 "dn-options-Room",
-                "caller-id-Room",
-                "label-Room",
-                "external-mask-Room",
                 "create-User",
+                "dn-options-User",
+                "phone-line-appearances",
                 "selected-user-association",
                 "previous-owner-association",
-                "assign-User",
-                "dn-options-User",
-                "caller-id-User",
-                "label-User",
-                "external-mask-User",
                 "phone-description",
                 "local-assignment",
                 "phone-configuration-refresh",
             ],
             writer.Calls);
-        Assert.Equal(18, result.CompletedOperations.Count);
+        Assert.Equal(11, result.CompletedOperations.Count);
     }
 
     [Fact]
@@ -662,29 +710,29 @@ public sealed class ClassroomPhoneWorkflowTests
     [Fact]
     public async Task SaveReportsCompletedOperationsAndStopsAfterPartialFailure()
     {
-        var writer = new RecordingWriter("label-Room");
+        var writer = new RecordingWriter("phone-line-appearances");
 
         var exception = await Assert.ThrowsAsync<ClassroomPhoneApplyException>(() =>
             ClassroomPhoneExecutor.ExecuteAsync(CreatePlan(), writer));
 
-        Assert.Equal("room-line-4-label", exception.FailedOperation);
+        Assert.Equal("phone-line-appearances", exception.FailedOperation);
         Assert.Equal(
             [
                 "phone-profile",
                 "room-line-4-create-dn",
-                "room-line-4-assign",
                 "room-line-4-dn-options",
-                "room-line-4-caller-id",
+                "user-line-2-create-dn",
+                "user-line-2-dn-options",
             ],
             exception.CompletedOperations);
         Assert.Equal(
             [
                 "phone-profile",
                 "create-Room",
-                "assign-Room",
                 "dn-options-Room",
-                "caller-id-Room",
-                "label-Room",
+                "create-User",
+                "dn-options-User",
+                "phone-line-appearances",
             ],
             writer.Calls);
         Assert.Contains("No automatic rollback", exception.Message, StringComparison.Ordinal);
@@ -822,7 +870,9 @@ public sealed class ClassroomPhoneWorkflowTests
             line.CallingSearchSpaceName,
             line.VoiceMailProfileName,
             new CucmCallForwardSettings(),
-            line.AlertingName);
+            line.AlertingName,
+            ExternalPresentationNumber: line.ExternalPresentationNumber,
+            ExternalPresentationName: line.ExternalPresentationName);
 
     private sealed class RecordingWriter(string? failAt = null) : IClassroomPhoneWriter
     {
@@ -836,29 +886,13 @@ public sealed class ClassroomPhoneWorkflowTests
             ClassroomLinePlan line,
             CancellationToken cancellationToken) => Record($"create-{line.Kind}");
 
-        public Task AssignLineAsync(
-            string phoneName,
-            ClassroomLinePlan line,
-            CancellationToken cancellationToken) => Record($"assign-{line.Kind}");
+        public Task UpdateLineAppearancesAsync(
+            ClassroomPhonePlan plan,
+            CancellationToken cancellationToken) => Record("phone-line-appearances");
 
         public Task UpdateDirectoryNumberAsync(
             ClassroomLinePlan line,
             CancellationToken cancellationToken) => Record($"dn-options-{line.Kind}");
-
-        public Task UpdateLineDisplayAsync(
-            string phoneName,
-            ClassroomLinePlan line,
-            CancellationToken cancellationToken) => Record($"caller-id-{line.Kind}");
-
-        public Task UpdateLineLabelAsync(
-            string phoneName,
-            ClassroomLinePlan line,
-            CancellationToken cancellationToken) => Record($"label-{line.Kind}");
-
-        public Task UpdateLineExternalMaskAsync(
-            string phoneName,
-            ClassroomLinePlan line,
-            CancellationToken cancellationToken) => Record($"external-mask-{line.Kind}");
 
         public Task UpdateAllCallSpeedDialAsync(
             string phoneName,
