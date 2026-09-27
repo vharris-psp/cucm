@@ -207,12 +207,47 @@ public sealed class ClassroomPhoneWorkflowTests
         var plan = ClassroomPhonePlanner.Create(withSpeedDial);
 
         Assert.NotNull(plan.AllCallSpeedDial);
-        Assert.Equal(6, plan.AllCallSpeedDial!.Index);
+        Assert.Equal(1, plan.AllCallSpeedDial!.AxlIndex);
         Assert.Equal("5551000", plan.AllCallSpeedDial.Destination);
         Assert.True(plan.AllCallSpeedDial.Update);
         var speedDialChange = Assert.Single(plan.Changes.Where(change => change.Key == "phone.all-call"));
         Assert.Equal("5551000", speedDialChange.Target);
         Assert.Equal("Update", speedDialChange.Action);
+    }
+
+    [Fact]
+    public void PlannerMatchesExistingAllCallByAxlOrdinalRatherThanPhysicalButton()
+    {
+        var input = CreateInput();
+        var configured = input with
+        {
+            Phone = input.Phone with
+            {
+                SpeedDials = [new CucmPhoneSpeedDial(1, "5551000", "All Call")],
+            },
+            BuildingPatterns = new Dictionary<string, BuildingPattern>(
+                input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+            },
+            CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
+                input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
+            {
+                ["HS-UserRoom"] = new TemplateCompliancePolicy(
+                    [
+                        .. input.CompliancePolicies["HS-UserRoom"].Slots,
+                        new TemplateComplianceSlot(6, TemplateComplianceSlotKind.SpeedDial),
+                    ]),
+            },
+        };
+
+        var plan = ClassroomPhonePlanner.Create(configured);
+
+        Assert.NotNull(plan.AllCallSpeedDial);
+        Assert.False(plan.AllCallSpeedDial!.Update);
+        var speedDialChange = Assert.Single(plan.Changes, change => change.Key == "phone.all-call");
+        Assert.Equal("5551000", speedDialChange.Current);
+        Assert.Equal("No change", speedDialChange.Action);
     }
 
     [Fact]

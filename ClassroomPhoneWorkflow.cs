@@ -101,7 +101,7 @@ internal sealed record ClassroomTemplateLayout(
     string PhoneTemplateName,
     int UserLineIndex,
     int RoomLineIndex,
-    int? SpeedDialIndex = null);
+    int? SpeedDialButtonIndex = null);
 
 internal sealed record ClassroomLinePlan(
     string Kind,
@@ -128,7 +128,7 @@ internal sealed record ClassroomLinePlan(
     bool ForwardNoAnswerToVoiceMail = false,
     int? NoAnswerRingDurationSeconds = null);
 
-internal sealed record ClassroomSpeedDialPlan(int Index, string Destination, string Label, bool Update);
+internal sealed record ClassroomSpeedDialPlan(int AxlIndex, string Destination, string Label, bool Update);
 
 internal sealed record ClassroomPhoneChange(
     string Key,
@@ -185,6 +185,8 @@ internal sealed record ClassroomPhonePlanInput(
 
 internal static class ClassroomPhonePlanner
 {
+    private const int AllCallAxlSpeedDialIndex = 1;
+
     internal static ClassroomTemplateLayout ResolveTemplateLayout(
         string? phoneTemplateName,
         IReadOnlyDictionary<string, TemplateCompliancePolicy> policies)
@@ -415,18 +417,22 @@ internal static class ClassroomPhonePlanner
             includeUser && input.UserDidUsesInventoryFallback && input.UserDid.Assignment is null;
 
         ClassroomSpeedDialPlan? allCallSpeedDial = null;
-        if (includeRoom && layout.SpeedDialIndex is { } speedDialIndex)
+        if (includeRoom && layout.SpeedDialButtonIndex is not null)
         {
             var allCallNumber = Normalize(buildingPattern.AllCallNumber);
             if (allCallNumber is not null)
             {
                 const string allCallLabel = "All Call";
                 var currentSpeedDial = (input.Phone.SpeedDials ?? [])
-                    .FirstOrDefault(speedDial => speedDial.Index == speedDialIndex);
+                    .FirstOrDefault(speedDial => speedDial.Index == AllCallAxlSpeedDialIndex);
                 var needsUpdate = currentSpeedDial is null ||
                     !EqualsValue(currentSpeedDial.Dirn, allCallNumber) ||
                     !EqualsValue(currentSpeedDial.Label, allCallLabel);
-                allCallSpeedDial = new ClassroomSpeedDialPlan(speedDialIndex, allCallNumber, allCallLabel, needsUpdate);
+                allCallSpeedDial = new ClassroomSpeedDialPlan(
+                    AllCallAxlSpeedDialIndex,
+                    allCallNumber,
+                    allCallLabel,
+                    needsUpdate);
             }
         }
 
@@ -446,7 +452,7 @@ internal static class ClassroomPhonePlanner
             input.UserDidUsesInventoryFallback,
             recordLocalAssignment,
             allCallSpeedDial,
-            layout.SpeedDialIndex is not null && Normalize(buildingPattern.AllCallNumber) is null);
+            layout.SpeedDialButtonIndex is not null && Normalize(buildingPattern.AllCallNumber) is null);
         return new ClassroomPhonePlan(
             phoneName,
             userId,
@@ -682,13 +688,13 @@ internal static class ClassroomPhonePlanner
                         : "Not used",
                 !includeUser ? "Skip (excluded)" : recordLocalAssignment ? "Record" : "No change"),
         };
-        if (layout.SpeedDialIndex is { } speedDialIndex)
+        if (layout.SpeedDialButtonIndex is { } speedDialButtonIndex)
         {
             var currentSpeedDial = (input.Phone.SpeedDials ?? [])
-                .FirstOrDefault(speedDial => speedDial.Index == speedDialIndex);
+                .FirstOrDefault(speedDial => speedDial.Index == AllCallAxlSpeedDialIndex);
             changes.Add(new ClassroomPhoneChange(
                 "phone.all-call",
-                $"All Call speed dial (button {speedDialIndex})",
+                $"All Call speed dial (button {speedDialButtonIndex})",
                 Display(currentSpeedDial?.Dirn),
                 allCallSpeedDial is not null ? allCallSpeedDial.Destination
                     : allCallNotConfigured ? "<Not configured for building>"
@@ -1295,7 +1301,7 @@ internal sealed class CucmClassroomPhoneWriter(
         CancellationToken cancellationToken) =>
         cucm.UpdatePhoneSpeedDialAsync(
             phoneName,
-            speedDial.Index,
+            speedDial.AxlIndex,
             speedDial.Destination,
             speedDial.Label,
             cancellationToken);
