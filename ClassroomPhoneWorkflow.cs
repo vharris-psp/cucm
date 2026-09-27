@@ -128,7 +128,12 @@ internal sealed record ClassroomLinePlan(
     bool ForwardNoAnswerToVoiceMail = false,
     int? NoAnswerRingDurationSeconds = null);
 
-internal sealed record ClassroomSpeedDialPlan(int AxlIndex, string Destination, string Label, bool Update);
+internal sealed record ClassroomSpeedDialPlan(
+    int BusyLampFieldIndex,
+    string Destination,
+    string Label,
+    bool Update,
+    IReadOnlyList<int> MisplacedRegularSpeedDialIndexes);
 
 internal sealed record ClassroomPhoneChange(
     string Key,
@@ -185,7 +190,7 @@ internal sealed record ClassroomPhonePlanInput(
 
 internal static class ClassroomPhonePlanner
 {
-    private const int AllCallAxlSpeedDialIndex = 1;
+    private const int AllCallBusyLampFieldIndex = 1;
 
     internal static ClassroomTemplateLayout ResolveTemplateLayout(
         string? phoneTemplateName,
@@ -423,16 +428,23 @@ internal static class ClassroomPhonePlanner
             if (allCallNumber is not null)
             {
                 const string allCallLabel = "All Call";
-                var currentSpeedDial = (input.Phone.SpeedDials ?? [])
-                    .FirstOrDefault(speedDial => speedDial.Index == AllCallAxlSpeedDialIndex);
+                var currentSpeedDial = (input.Phone.BusyLampFields ?? [])
+                    .FirstOrDefault(speedDial => speedDial.Index == AllCallBusyLampFieldIndex);
                 var needsUpdate = currentSpeedDial is null ||
-                    !EqualsValue(currentSpeedDial.Dirn, allCallNumber) ||
+                    !EqualsValue(currentSpeedDial.Destination, allCallNumber) ||
                     !EqualsValue(currentSpeedDial.Label, allCallLabel);
+                var misplacedRegularSpeedDialIndexes = (input.Phone.SpeedDials ?? [])
+                    .Where(speedDial => EqualsValue(speedDial.Dirn, allCallNumber))
+                    .Select(speedDial => speedDial.Index)
+                    .Distinct()
+                    .Order()
+                    .ToArray();
                 allCallSpeedDial = new ClassroomSpeedDialPlan(
-                    AllCallAxlSpeedDialIndex,
+                    AllCallBusyLampFieldIndex,
                     allCallNumber,
                     allCallLabel,
-                    needsUpdate);
+                    needsUpdate,
+                    misplacedRegularSpeedDialIndexes);
             }
         }
 
@@ -690,20 +702,32 @@ internal static class ClassroomPhonePlanner
         };
         if (layout.SpeedDialButtonIndex is { } speedDialButtonIndex)
         {
-            var currentSpeedDial = (input.Phone.SpeedDials ?? [])
-                .FirstOrDefault(speedDial => speedDial.Index == AllCallAxlSpeedDialIndex);
+            var currentSpeedDial = (input.Phone.BusyLampFields ?? [])
+                .FirstOrDefault(speedDial => speedDial.Index == AllCallBusyLampFieldIndex);
             changes.Add(new ClassroomPhoneChange(
                 "phone.all-call",
                 $"All Call speed dial (button {speedDialButtonIndex})",
-                Display(currentSpeedDial?.Dirn),
+                Display(currentSpeedDial?.Destination),
                 allCallSpeedDial is not null ? allCallSpeedDial.Destination
                     : allCallNotConfigured ? "<Not configured for building>"
                     : "<none>",
-                allCallSpeedDial is not null ? (allCallSpeedDial.Update ? "Update" : "No change")
+                allCallSpeedDial is not null ? AllCallAction(allCallSpeedDial)
                     : allCallNotConfigured ? "Configure via 'configure buildings'"
                     : "No change"));
         }
         return changes;
+
+        static string AllCallAction(ClassroomSpeedDialPlan speedDial)
+        {
+            var cleanupCount = speedDial.MisplacedRegularSpeedDialIndexes.Count;
+            return (speedDial.Update, cleanupCount) switch
+            {
+                (true, > 0) => $"Update BLF; remove {cleanupCount} misplaced regular speed dial(s)",
+                (true, _) => "Update BLF",
+                (false, > 0) => $"Remove {cleanupCount} misplaced regular speed dial(s)",
+                _ => "No change",
+            };
+        }
     }
 
     private static ClassroomPhoneChange Change(
@@ -911,6 +935,11 @@ internal interface IClassroomPhoneWriter
         ClassroomSpeedDialPlan speedDial,
         CancellationToken cancellationToken);
 
+    Task RemoveRegularSpeedDialAsync(
+        string phoneName,
+        int speedDialIndex,
+        CancellationToken cancellationToken);
+
     Task UpdateUserAssociationAsync(ClassroomPhonePlan plan, CancellationToken cancellationToken);
 
     Task UpdatePreviousOwnerAssociationAsync(
@@ -975,6 +1004,17 @@ internal static class ClassroomPhoneExecutor
                 ct => writer.UpdateAllCallSpeedDialAsync(plan.PhoneName, allCallSpeedDial, ct),
                 completed,
                 cancellationToken);
+        }
+        if (plan.AllCallSpeedDial is { } configuredAllCall)
+        {
+            foreach (var speedDialIndex in configuredAllCall.MisplacedRegularSpeedDialIndexes)
+            {
+                await ExecuteAsync(
+                    $"remove-misplaced-all-call-speed-dial-{speedDialIndex}",
+                    ct => writer.RemoveRegularSpeedDialAsync(plan.PhoneName, speedDialIndex, ct),
+                    completed,
+                    cancellationToken);
+            }
         }
         await ExecuteLineCreationAsync(plan.RoomLine, writer, completed, cancellationToken);
         await ExecuteLineAssignmentAsync(
@@ -1299,12 +1339,18 @@ internal sealed class CucmClassroomPhoneWriter(
         string phoneName,
         ClassroomSpeedDialPlan speedDial,
         CancellationToken cancellationToken) =>
-        cucm.UpdatePhoneSpeedDialAsync(
+        cucm.UpdatePhoneBusyLampFieldAsync(
             phoneName,
-            speedDial.AxlIndex,
+            speedDial.BusyLampFieldIndex,
             speedDial.Destination,
             speedDial.Label,
             cancellationToken);
+
+    public Task RemoveRegularSpeedDialAsync(
+        string phoneName,
+        int speedDialIndex,
+        CancellationToken cancellationToken) =>
+        cucm.RemovePhoneSpeedDialAsync(phoneName, speedDialIndex, cancellationToken);
 
     public Task UpdateUserAssociationAsync(
         ClassroomPhonePlan plan,
