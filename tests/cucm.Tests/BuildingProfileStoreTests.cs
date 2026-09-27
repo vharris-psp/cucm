@@ -16,7 +16,9 @@ public sealed class BuildingProfileStoreTests : IDisposable
                 [" CentralElem ", "CentralElem_SRST", "centralElem"],
                 " Standard 7841 SIP 1DN-1SdBLF-2DN ",
                 " CentralElem_SRST ",
-                LocationName: " CE "));
+                AllCallNumber: " #9000 ",
+                LocationName: " CE ",
+                AllCallRoutePartitionName: " Local "));
 
         var profiles = await store.LoadAsync();
         var profile = Assert.Single(profiles).Value;
@@ -25,6 +27,8 @@ public sealed class BuildingProfileStoreTests : IDisposable
         Assert.Equal(["CentralElem", "CentralElem_SRST"], profile.DevicePoolNames);
         Assert.Equal("Standard 7841 SIP 1DN-1SdBLF-2DN", profile.PhoneTemplateName);
         Assert.Equal("CE", profile.LocationName);
+        Assert.Equal("#9000", profile.AllCallNumber);
+        Assert.Equal("Local", profile.AllCallRoutePartitionName);
         Assert.True(store.Exists);
     }
 
@@ -51,10 +55,11 @@ public sealed class BuildingProfileStoreTests : IDisposable
         var store = new BuildingProfileStore(_directory);
         const string legacy =
             "{\"PHS\":{\"routePartitionName\":\"HS-Rooms\",\"devicePoolName\":\"HighSchool\"," +
-            "\"devicePools\":[\"HighSchool\"]}}";
+            "\"devicePools\":[\"HighSchool\"],\"allCallNumber\":\"#9000\"}}";
 
         var beforeImport = await store.LoadEffectiveAsync(legacy);
         Assert.Equal("HS-Rooms", Assert.Single(beforeImport).Value.RoutePartitionName);
+        Assert.Null(Assert.Single(beforeImport).Value.AllCallRoutePartitionName);
 
         await store.ReplaceAsync(new Dictionary<string, BuildingPattern>
         {

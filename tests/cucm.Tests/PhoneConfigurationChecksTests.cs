@@ -11,7 +11,9 @@ public sealed class PhoneConfigurationChecksTests
                 "devicePoolName": "High School Classrooms",
                 "devicePools": ["High School"],
                 "phoneTemplateName": "HS-UserRoom",
-                "locationName": "PHS"
+                "locationName": "PHS",
+                "allCallNumber": "#9000",
+                "allCallRoutePartitionName": "Local"
               }
             }
             """);
@@ -22,6 +24,8 @@ public sealed class PhoneConfigurationChecksTests
         Assert.Equal(["High School", "High School Classrooms"], building.DevicePoolNames);
         Assert.Equal("HS-UserRoom", building.PhoneTemplateName);
         Assert.Equal("PHS", building.LocationName);
+        Assert.Equal("#9000", building.AllCallNumber);
+        Assert.Equal("Local", building.AllCallRoutePartitionName);
     }
 
     [Fact]

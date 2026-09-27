@@ -117,6 +117,17 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
         [Fact]
         public async Task AllCallUsesLiveDirectoryNumberSelector()
         {
+            await new BuildingProfileStore(_directory).SaveAsync(
+                "PHS",
+                new BuildingPattern(
+                    "HS-Rooms",
+                    ["HighSchool"],
+                    "Template",
+                    "HighSchool",
+                    "2313482160",
+                    "#9000",
+                    "PHS",
+                    "Local"));
                 var handler = new FakeHandler(
                         """
                         <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -127,6 +138,11 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
                                             <pattern>#9000</pattern>
                                             <routePartitionName>Local</routePartitionName>
                                             <description>All Call</description>
+                                        </line>
+                                        <line uuid="other-line-uuid">
+                                            <pattern>#9000</pattern>
+                                            <routePartitionName>Other</routePartitionName>
+                                            <description>Wrong partition</description>
                                         </line>
                                     </return>
                                 </listLineResponse>
@@ -145,15 +161,47 @@ public sealed class BuildingConfigurationCommandTests : IDisposable
                 var response = Assert.IsType<ModuleTableResponse>(
                         Assert.IsType<ModuleCommandResult>(outcome).Response);
                 var number = Assert.Single(response.Rows, row => row.Id == "line-uuid");
-                Assert.Equal(["#9000", "Local", "All Call", ""], number.Cells);
+                Assert.Equal(["#9000", "Local", "All Call", "Current"], number.Cells);
+                Assert.Equal(
+                        "",
+                        Assert.Single(response.Rows, row => row.Id == "other-line-uuid").Cells[3]);
                 Assert.Equal(
                         [
                                 "configure", "buildings", "edit-review", "PHS", "HS-Rooms", "HighSchool",
-                                "HighSchool", "HighSchool", "Template", "2313482160", "#9000",
+                                "HighSchool", "HighSchool", "Template", "2313482160", "#9000", "Local",
                         ],
                         number.Arguments);
                 Assert.Contains(response.Rows, row => row.Id == "none");
         }
+
+    [Fact]
+    public async Task AllCallReviewAndSavePreserveDirectoryNumberAndPartition()
+    {
+        using var cucm = CreateCucm();
+        var reviewOutcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(
+                [
+                    "buildings", "edit-review", "PHS", "HS-Rooms", "HighSchool",
+                    "PHS", "HighSchool,HighSchool_SRST", "Template", "2313482160",
+                    "#9000", "Local",
+                ]),
+            cucm);
+
+        var review = Assert.IsType<ModuleTableResponse>(
+            Assert.IsType<ModuleCommandResult>(reviewOutcome).Response);
+        var saveRow = Assert.Single(review.Rows, row => row.Id == "save");
+        Assert.Equal("#9000", saveRow.Cells[7]);
+        Assert.Equal("Local", saveRow.Cells[8]);
+
+        var saveOutcome = await BuildingConfigurationCommand.ExecuteAsync(
+            CreateContext(saveRow.Arguments!.Skip(1).ToArray()),
+            cucm);
+
+        Assert.Equal(0, Assert.IsType<ModuleCommandResult>(saveOutcome).ExitCode);
+        var stored = Assert.Single(await new BuildingProfileStore(_directory).LoadAsync()).Value;
+        Assert.Equal("#9000", stored.AllCallNumber);
+        Assert.Equal("Local", stored.AllCallRoutePartitionName);
+    }
 
     [Fact]
     public async Task ImportRequiresReviewThenCreatesAuthoritativeLocalStore()

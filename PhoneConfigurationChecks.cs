@@ -40,7 +40,8 @@ internal sealed record BuildingPattern(
     string? DevicePoolName = null,
     string? RoomExternalPhoneNumberMask = null,
     string? AllCallNumber = null,
-    string? LocationName = null);
+    string? LocationName = null,
+    string? AllCallRoutePartitionName = null);
 
 internal enum TemplateComplianceSlotKind
 {
@@ -277,7 +278,8 @@ internal static class PhoneConfigurationChecks
                     devicePoolName,
                     ReadString(property.Value, "roomExternalPhoneNumberMask"),
                     ReadString(property.Value, "allCallNumber"),
-                    ReadString(property.Value, "locationName"));
+                    ReadString(property.Value, "locationName"),
+                    ReadString(property.Value, "allCallRoutePartitionName"));
             }
             return patterns;
         }

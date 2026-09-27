@@ -4216,7 +4216,17 @@ static async Task<ClassroomPhonePlan> CreateClassroomPhonePlanAsync(
     ClassroomApplyScope scope = ClassroomApplyScope.Both)
 {
     var buildingPatterns = await RequireBuildingPatternsAsync(context);
-    var buildingPattern = RequireBuildingPattern(buildingPatterns, buildingCode);
+    var buildingPattern = await ClassroomAllCallResolver.ResolveAsync(
+        cucm,
+        RequireBuildingPattern(buildingPatterns, buildingCode),
+        context.CancellationToken);
+    var effectiveBuildingPatterns = new Dictionary<string, BuildingPattern>(
+        buildingPatterns,
+        StringComparer.OrdinalIgnoreCase)
+    {
+        [buildingCode] = buildingPattern,
+    };
+    buildingPatterns = effectiveBuildingPatterns;
     var compliancePolicies = PhoneConfigurationChecks.ParseTemplateCompliancePolicies(
         context.Configuration.GetValueOrDefault("template-compliance-policies") ?? "{}");
     var phone = await RequirePhoneAsync(cucm, phoneName, context.CancellationToken);

@@ -1,3 +1,6 @@
+using System.Net;
+using System.Xml.Linq;
+using VSharp.Cucm;
 using VSharp.Cucm.Models;
 
 public sealed class ClassroomPhoneWorkflowTests
@@ -255,7 +258,11 @@ public sealed class ClassroomPhoneWorkflowTests
             BuildingPatterns = new Dictionary<string, BuildingPattern>(
                 input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
             {
-                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+                ["HS"] = input.BuildingPatterns["HS"] with
+                {
+                    AllCallNumber = "#9000",
+                    AllCallRoutePartitionName = "Local",
+                },
             },
             CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
                 input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
@@ -272,27 +279,39 @@ public sealed class ClassroomPhoneWorkflowTests
 
         Assert.NotNull(plan.AllCallSpeedDial);
         Assert.Equal(1, plan.AllCallSpeedDial!.BusyLampFieldIndex);
-        Assert.Equal("5551000", plan.AllCallSpeedDial.Destination);
+        Assert.Equal("#9000", plan.AllCallSpeedDial.Destination);
+        Assert.Equal("Local", plan.AllCallSpeedDial.RoutePartitionName);
         Assert.True(plan.AllCallSpeedDial.Update);
         var speedDialChange = Assert.Single(plan.Changes.Where(change => change.Key == "phone.all-call"));
-        Assert.Equal("5551000", speedDialChange.Target);
+        Assert.Equal("#9000", speedDialChange.Target);
         Assert.Equal("Update BLF", speedDialChange.Action);
     }
 
     [Fact]
-    public void PlannerMatchesExistingAllCallByBusyLampOrdinalRatherThanPhysicalButton()
+    public void PlannerMatchesExistingAllCallByBusyLampOrdinalDirectoryNumberAndPartition()
     {
         var input = CreateInput();
         var configured = input with
         {
             Phone = input.Phone with
             {
-                BusyLampFields = [new CucmPhoneBusyLampField(1, "5551000", "All Call")],
+                BusyLampFields =
+                [
+                    new CucmPhoneBusyLampField(1, null, "All Call")
+                    {
+                        DirectoryNumber = "#9000",
+                        RoutePartition = "Local",
+                    },
+                ],
             },
             BuildingPatterns = new Dictionary<string, BuildingPattern>(
                 input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
             {
-                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+                ["HS"] = input.BuildingPatterns["HS"] with
+                {
+                    AllCallNumber = "#9000",
+                    AllCallRoutePartitionName = "Local",
+                },
             },
             CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
                 input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
@@ -310,9 +329,89 @@ public sealed class ClassroomPhoneWorkflowTests
         Assert.NotNull(plan.AllCallSpeedDial);
         Assert.False(plan.AllCallSpeedDial!.Update);
         var speedDialChange = Assert.Single(plan.Changes, change => change.Key == "phone.all-call");
-        Assert.Equal("5551000", speedDialChange.Current);
+        Assert.Equal("#9000", speedDialChange.Current);
         Assert.Equal("Reapply BLF", speedDialChange.Action);
+
+                var wrongPartition = ClassroomPhonePlanner.Create(configured with
+                {
+                        Phone = configured.Phone with
+                        {
+                                BusyLampFields =
+                                [
+                                        new CucmPhoneBusyLampField(1, null, "All Call")
+                                        {
+                                                DirectoryNumber = "#9000",
+                                                RoutePartition = "Other",
+                                        },
+                                ],
+                        },
+                });
+                Assert.True(wrongPartition.AllCallSpeedDial!.Update);
     }
+
+        [Fact]
+        public async Task LegacyPatternOnlyAllCallResolvesItsPartitionLive()
+        {
+                var handler = new RecordingCucmHandler(
+                        """
+                        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+                            <soapenv:Body>
+                                <getLineResponse>
+                                    <return>
+                                        <line uuid="all-call-uuid">
+                                            <pattern>#9000</pattern>
+                                            <routePartitionName>Local</routePartitionName>
+                                        </line>
+                                    </return>
+                                </getLineResponse>
+                            </soapenv:Body>
+                        </soapenv:Envelope>
+                        """);
+                using var cucm = CreateCucm(handler);
+
+                var resolved = await ClassroomAllCallResolver.ResolveAsync(
+                        cucm,
+                        new BuildingPattern("HS-Rooms", [], AllCallNumber: "#9000"),
+                        CancellationToken.None);
+
+                Assert.Equal("#9000", resolved.AllCallNumber);
+                Assert.Equal("Local", resolved.AllCallRoutePartitionName);
+                var getLine = XDocument.Parse(handler.RequestBody!)
+                        .Descendants()
+                        .Single(element => element.Name.LocalName == "getLine");
+                Assert.DoesNotContain(
+                        getLine.Elements(),
+                        element => element.Name.LocalName == "routePartitionName");
+        }
+
+        [Fact]
+        public async Task MissingConfiguredAllCallFailsClearly()
+        {
+                var handler = new RecordingCucmHandler(
+                        """
+                        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+                            <soapenv:Body>
+                                <soapenv:Fault>
+                                    <faultcode>soapenv:Server</faultcode>
+                                    <faultstring>Item not found</faultstring>
+                                </soapenv:Fault>
+                            </soapenv:Body>
+                        </soapenv:Envelope>
+                        """);
+                using var cucm = CreateCucm(handler);
+
+                var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                        ClassroomAllCallResolver.ResolveAsync(
+                                cucm,
+                                new BuildingPattern(
+                                        "HS-Rooms",
+                                        [],
+                                        AllCallNumber: "#9000",
+                                        AllCallRoutePartitionName: "Local"),
+                                CancellationToken.None));
+
+                Assert.Contains("Configured All Call DN '#9000' in partition 'Local' was not found", exception.Message);
+        }
 
     [Fact]
     public void PlannerDoesNotTreatOrdinarySpeedDialAsConfiguredBlfHardkey()
@@ -322,12 +421,16 @@ public sealed class ClassroomPhoneWorkflowTests
         {
             Phone = input.Phone with
             {
-                SpeedDials = [new CucmPhoneSpeedDial(1, "5551000", "All Call")],
+                SpeedDials = [new CucmPhoneSpeedDial(1, "#9000", "All Call")],
             },
             BuildingPatterns = new Dictionary<string, BuildingPattern>(
                 input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
             {
-                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+                ["HS"] = input.BuildingPatterns["HS"] with
+                {
+                    AllCallNumber = "#9000",
+                    AllCallRoutePartitionName = "Local",
+                },
             },
             CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
                 input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
@@ -382,14 +485,18 @@ public sealed class ClassroomPhoneWorkflowTests
             {
                 SpeedDials =
                 [
-                    new CucmPhoneSpeedDial(1, "5551000", "All Call"),
-                    new CucmPhoneSpeedDial(2, "5551000", "All Call"),
+                    new CucmPhoneSpeedDial(1, "#9000", "All Call"),
+                    new CucmPhoneSpeedDial(2, "#9000", "All Call"),
                 ],
             },
             BuildingPatterns = new Dictionary<string, BuildingPattern>(
                 input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
             {
-                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "5551000" },
+                ["HS"] = input.BuildingPatterns["HS"] with
+                {
+                    AllCallNumber = "#9000",
+                    AllCallRoutePartitionName = "Local",
+                },
             },
             CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
                 input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
@@ -420,7 +527,7 @@ public sealed class ClassroomPhoneWorkflowTests
             UpdatePhoneProfile = false,
             RoomLine = Converged(original.RoomLine),
             UserLine = Converged(original.UserLine),
-            AllCallSpeedDial = new ClassroomSpeedDialPlan(1, "#9000", "All Call", false, []),
+            AllCallSpeedDial = new ClassroomSpeedDialPlan(1, "#9000", "Local", "All Call", false, []),
             AddUserAssociation = false,
             RemovePreviousOwnerAssociation = false,
             UpdateDescription = false,
@@ -511,7 +618,11 @@ public sealed class ClassroomPhoneWorkflowTests
             BuildingPatterns = new Dictionary<string, BuildingPattern>(
                 input.BuildingPatterns, StringComparer.OrdinalIgnoreCase)
             {
-                ["HS"] = input.BuildingPatterns["HS"] with { AllCallNumber = "#9000" },
+                ["HS"] = input.BuildingPatterns["HS"] with
+                {
+                    AllCallNumber = "#9000",
+                    AllCallRoutePartitionName = "Local",
+                },
             },
             CompliancePolicies = new Dictionary<string, TemplateCompliancePolicy>(
                 input.CompliancePolicies, StringComparer.OrdinalIgnoreCase)
@@ -526,9 +637,45 @@ public sealed class ClassroomPhoneWorkflowTests
 
         Assert.NotNull(plan.AllCallSpeedDial);
         Assert.Equal("#9000", plan.AllCallSpeedDial!.Destination);
+        Assert.Equal("Local", plan.AllCallSpeedDial.RoutePartitionName);
         Assert.Equal(
             "Update BLF",
             Assert.Single(plan.Changes, change => change.Key == "phone.all-call").Action);
+    }
+
+    [Fact]
+    public async Task WriterUsesInternalDirectoryNumberAndPartitionForAllCall()
+    {
+        var handler = new RecordingCucmHandler();
+        using var cucm = new CucmService(
+            new CucmServiceConfig(
+                "https://cucm.invalid/axl/",
+                "14.0",
+                "test-user",
+                "test-password"),
+            new HttpClient(handler));
+        var writer = new CucmClassroomPhoneWriter(
+            cucm,
+            new UserDidStore(Path.Combine(Path.GetTempPath(), $"cucm-writer-{Guid.NewGuid():N}")));
+
+        await writer.UpdateAllCallSpeedDialAsync(
+            "SEP0001",
+            new ClassroomSpeedDialPlan(1, "#9000", "Local", "All Call", true, []),
+            CancellationToken.None);
+
+        var busyLampField = XDocument.Parse(handler.RequestBody!)
+            .Descendants()
+            .Single(element => element.Name.LocalName == "busyLampField");
+        Assert.Equal(
+            ["blfDirn", "routePartition", "label", "index"],
+            busyLampField.Elements().Select(element => element.Name.LocalName));
+        Assert.Equal("#9000", busyLampField.Elements().Single(e => e.Name.LocalName == "blfDirn").Value);
+        Assert.Equal(
+            "Local",
+            busyLampField.Elements().Single(e => e.Name.LocalName == "routePartition").Value);
+        Assert.DoesNotContain(
+            busyLampField.Elements(),
+            element => element.Name.LocalName == "blfDest");
     }
 
     [Fact]
@@ -892,6 +1039,46 @@ public sealed class ClassroomPhoneWorkflowTests
             ExternalPresentationName: line.ExternalPresentationName,
             EnterpriseAlternateNumberMask: line.EnterpriseAlternateNumberMask,
             UseEnterpriseAlternateNumber: line.EnterpriseAlternateNumberMask is not null);
+
+        private static CucmService CreateCucm(HttpMessageHandler handler) =>
+            new(
+                new CucmServiceConfig(
+                    "https://cucm.invalid/axl/",
+                    "14.0",
+                    "test-user",
+                    "test-password"),
+                new HttpClient(handler));
+
+        private sealed class RecordingCucmHandler(string? responseBody = null) : HttpMessageHandler
+        {
+                internal string? RequestBody { get; private set; }
+
+                protected override async Task<HttpResponseMessage> SendAsync(
+                        HttpRequestMessage request,
+                        CancellationToken cancellationToken)
+                {
+                        RequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(responseBody ??
+                                        """
+                                        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+                                            <soapenv:Body>
+                                                <getPhoneResponse>
+                                                    <return>
+                                                        <phone>
+                                                            <name>SEP0001</name>
+                                                            <lines />
+                                                            <busyLampFields />
+                                                        </phone>
+                                                    </return>
+                                                </getPhoneResponse>
+                                            </soapenv:Body>
+                                        </soapenv:Envelope>
+                                        """),
+                        };
+                }
+        }
 
     private sealed class RecordingWriter(string? failAt = null) : IClassroomPhoneWriter
     {

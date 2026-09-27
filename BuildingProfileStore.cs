@@ -108,7 +108,8 @@ internal sealed class BuildingProfileStore(string dataDirectory)
                     devicePoolName,
                     ReadString(property.Value, "roomExternalPhoneNumberMask"),
                     ReadString(property.Value, "allCallNumber"),
-                    ReadString(property.Value, "locationName")));
+                    ReadString(property.Value, "locationName"),
+                    ReadString(property.Value, "allCallRoutePartitionName")));
             }
             Validate(profiles);
             return profiles;
@@ -160,6 +161,7 @@ internal sealed class BuildingProfileStore(string dataDirectory)
                     WriteOptional(writer, "locationName", profile.LocationName);
                     WriteOptional(writer, "roomExternalPhoneNumberMask", profile.RoomExternalPhoneNumberMask);
                     WriteOptional(writer, "allCallNumber", profile.AllCallNumber);
+                    WriteOptional(writer, "allCallRoutePartitionName", profile.AllCallRoutePartitionName);
                     writer.WriteEndObject();
                 }
                 writer.WriteEndObject();
@@ -224,7 +226,8 @@ internal sealed class BuildingProfileStore(string dataDirectory)
             devicePoolName,
             NormalizeValue(profile.RoomExternalPhoneNumberMask),
             NormalizeValue(profile.AllCallNumber),
-            NormalizeValue(profile.LocationName));
+            NormalizeValue(profile.LocationName),
+            NormalizeValue(profile.AllCallRoutePartitionName));
     }
 
     private static void Validate(IReadOnlyDictionary<string, BuildingPattern> profiles)

@@ -134,6 +134,7 @@ internal sealed record ClassroomLinePlan(
 internal sealed record ClassroomSpeedDialPlan(
     int BusyLampFieldIndex,
     string Destination,
+    string RoutePartitionName,
     string Label,
     bool Update,
     IReadOnlyList<int> MisplacedRegularSpeedDialIndexes);
@@ -190,6 +191,49 @@ internal sealed record ClassroomPhonePlanInput(
     string? UserForwardCallingSearchSpaceName = null,
     string? UserCallingSearchSpaceActivationPolicy = null,
     int? UserNoAnswerRingDurationSeconds = null);
+
+internal static class ClassroomAllCallResolver
+{
+    internal static async Task<BuildingPattern> ResolveAsync(
+        CucmService cucm,
+        BuildingPattern buildingPattern,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(cucm);
+        ArgumentNullException.ThrowIfNull(buildingPattern);
+        var allCallNumber = Normalize(buildingPattern.AllCallNumber);
+        if (allCallNumber is null)
+        {
+            return buildingPattern;
+        }
+
+        var configuredPartition = Normalize(buildingPattern.AllCallRoutePartitionName);
+        var directoryNumber = await cucm.GetDirectoryNumberAsync(
+            allCallNumber,
+            configuredPartition,
+            cancellationToken);
+        if (directoryNumber is null)
+        {
+            var partitionDetail = configuredPartition is null
+                ? string.Empty
+                : $" in partition '{configuredPartition}'";
+            throw new InvalidOperationException(
+                $"Configured All Call DN '{allCallNumber}'{partitionDetail} was not found in CUCM. " +
+                "Select an existing All Call directory number in 'vt cucm configure buildings'.");
+        }
+        var resolvedPartition = Normalize(directoryNumber.RoutePartitionName) ??
+            throw new InvalidOperationException(
+                $"Configured All Call DN '{allCallNumber}' does not have a route partition in CUCM.");
+        return buildingPattern with
+        {
+            AllCallNumber = allCallNumber,
+            AllCallRoutePartitionName = resolvedPartition,
+        };
+    }
+
+    private static string? Normalize(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}
 
 internal static class ClassroomPhonePlanner
 {
@@ -430,11 +474,16 @@ internal static class ClassroomPhonePlanner
             var allCallNumber = Normalize(buildingPattern.AllCallNumber);
             if (allCallNumber is not null)
             {
+                var allCallRoutePartitionName = Normalize(buildingPattern.AllCallRoutePartitionName) ??
+                    throw new InvalidOperationException(
+                        $"Building '{input.BuildingCode}' All Call DN '{allCallNumber}' has no resolved " +
+                        "route partition.");
                 const string allCallLabel = "All Call";
                 var currentSpeedDial = (input.Phone.BusyLampFields ?? [])
                     .FirstOrDefault(speedDial => speedDial.Index == AllCallBusyLampFieldIndex);
                 var needsUpdate = currentSpeedDial is null ||
-                    !EqualsValue(currentSpeedDial.Destination, allCallNumber) ||
+                    !EqualsValue(currentSpeedDial.DirectoryNumber, allCallNumber) ||
+                    !EqualsValue(currentSpeedDial.RoutePartition, allCallRoutePartitionName) ||
                     !EqualsValue(currentSpeedDial.Label, allCallLabel);
                 var misplacedRegularSpeedDialIndexes = (input.Phone.SpeedDials ?? [])
                     .Where(speedDial => EqualsValue(speedDial.Dirn, allCallNumber))
@@ -445,6 +494,7 @@ internal static class ClassroomPhonePlanner
                 allCallSpeedDial = new ClassroomSpeedDialPlan(
                     AllCallBusyLampFieldIndex,
                     allCallNumber,
+                    allCallRoutePartitionName,
                     allCallLabel,
                     needsUpdate,
                     misplacedRegularSpeedDialIndexes);
@@ -764,7 +814,7 @@ internal static class ClassroomPhonePlanner
             changes.Add(new ClassroomPhoneChange(
                 "phone.all-call",
                 $"All Call speed dial (button {speedDialButtonIndex})",
-                Display(currentSpeedDial?.Destination),
+                Display(currentSpeedDial?.DirectoryNumber),
                 allCallSpeedDial is not null ? allCallSpeedDial.Destination
                     : allCallNotConfigured ? "<Not configured for building>"
                     : "<none>",
@@ -1387,11 +1437,12 @@ internal sealed class CucmClassroomPhoneWriter(
         string phoneName,
         ClassroomSpeedDialPlan speedDial,
         CancellationToken cancellationToken) =>
-        cucm.UpdatePhoneBusyLampFieldAsync(
+        cucm.UpdatePhoneInternalBusyLampFieldAsync(
             phoneName,
             speedDial.BusyLampFieldIndex,
             speedDial.Destination,
             speedDial.Label,
+            speedDial.RoutePartitionName,
             cancellationToken);
 
     public Task RemoveRegularSpeedDialAsync(
