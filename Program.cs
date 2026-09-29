@@ -8,7 +8,7 @@ return await ModuleApplication
     .Create("cucm", "CUCM")
     .Setting("publisher", "CUCM publisher hostname")
     .Setting("port", "CUCM AXL HTTPS port", defaultValue: "8443")
-    .Setting("axl-version", "CUCM AXL schema version", defaultValue: "15.0")
+    .Setting("axl-version", "CUCM AXL schema version", defaultValue: "14.0")
     .Setting(
         "trusted-certificate",
         "Absolute or ~/... path to a PEM certificate trusted for CUCM AXL; omit to use system trust",
