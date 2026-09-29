@@ -1,4 +1,4 @@
-version: "0.11.18"
+version: "0.11.19"
 vt_version: "1.5.4"
 project_file: "cucm.csproj"
 dependencies:
