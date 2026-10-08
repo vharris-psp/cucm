@@ -1656,27 +1656,6 @@ static async Task<UserDid> RequireAvailableUserDidForUserAsync(
     return did;
 }
 
-static async Task<UserDid> RequireSelectableUserDidForPhoneAsync(
-    ModuleContext context,
-    CucmUser user,
-    string phoneName)
-{
-    var extension = UserDidStore.NormalizeUserExtension(user.TelephoneNumber) ??
-        throw new InvalidOperationException(
-            $"CUCM user '{user.UserId}' does not have a usable four-digit LDAP telephone number.");
-    var did = await FindUserDidAsync(context, extension) ??
-        throw new InvalidOperationException(
-            $"CUCM user '{user.UserId}' maps to DN '{extension}', which is not in the local pool.");
-    if (did.Assignment is { } assignment &&
-        !(assignment.PhoneName.Equals(phoneName, StringComparison.OrdinalIgnoreCase) &&
-          string.Equals(assignment.UserId, user.UserId, StringComparison.OrdinalIgnoreCase)))
-    {
-        throw new InvalidOperationException(
-            $"User DN '{extension}' is already assigned to '{did.Assignment.PhoneName}'.");
-    }
-    return did;
-}
-
 static async Task<CucmUser> RequireUserAsync(
     CucmService cucm,
     string userId,
